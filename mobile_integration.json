@@ -1,0 +1,206 @@
+{
+  "_doc": "WeldVision Backend — Mobile Integration Reference",
+  "_version": "2.0.0",
+  "_note": "Gemini AI analysis is currently disabled. Images are stored and stitched only. Gemini will be enabled in the next phase.",
+
+  "base_url": "https://YOUR-RAILWAY-APP.railway.app",
+
+  "endpoints": {
+
+    "1_submit_images": {
+      "method": "POST",
+      "path": "/api/v1/inspections/video",
+      "description": "Send trimmed weld frames extracted from video. Backend stores them in AWS S3, stitches pairs, and returns all URLs.",
+      "content_type": "multipart/form-data",
+      "form_fields": {
+        "object_id": {
+          "type": "string",
+          "required": true,
+          "description": "Weld object identifier. Used to label images (A → A1, A2 …) and create S3 folder.",
+          "example": "A"
+        },
+        "object_name": {
+          "type": "string",
+          "required": false,
+          "description": "Human-readable name of the weld object.",
+          "example": "Pipe Joint A"
+        },
+        "scan_number": {
+          "type": "string",
+          "required": false,
+          "description": "Scan or inspection number.",
+          "example": "1"
+        },
+        "side": {
+          "type": "string",
+          "required": false,
+          "description": "Which side of the weld is being inspected.",
+          "example": "Top"
+        },
+        "welding_type": {
+          "type": "string",
+          "required": false,
+          "example": "Fillet Weld"
+        },
+        "welding_position": {
+          "type": "string",
+          "required": false,
+          "example": "Flat"
+        },
+        "remarks": {
+          "type": "string",
+          "required": false,
+          "example": "Minor surface rust visible near joint"
+        },
+        "images": {
+          "type": "file[]",
+          "required": true,
+          "description": "Trimmed weld frame images in order (JPEG/PNG). Max 50 images, 20 MB each.",
+          "accepted_types": ["image/jpeg", "image/png", "image/webp", "image/bmp"]
+        }
+      },
+      "s3_structure": {
+        "description": "Images are stored under this S3 path structure",
+        "object_folder": "inspections/{object_id}/",
+        "raw_frames":    "inspections/{object_id}/{session_id}/frames/raw/{label}.jpg",
+        "stitched":      "inspections/{object_id}/{session_id}/frames/stitched/{label}.jpg",
+        "annotated":     "inspections/{object_id}/{session_id}/frames/annotated/{label}_annotated.jpg",
+        "compile_chart": "inspections/{object_id}/{session_id}/chart/compile_chart.jpg"
+      },
+      "response_200": {
+        "message": "string — success message",
+        "session_id": "string (UUID) — unique ID for this inspection session",
+        "object_id": "string",
+        "object_name": "string or null",
+        "scan_number": "string or null",
+        "side": "string or null",
+        "frames_extracted": "integer — how many images were received",
+        "frame_pairs_analyzed": "integer — number of stitched pairs",
+        "compile_chart_url": "string — S3 URL of the full compile chart image",
+        "per_pair_results": [
+          {
+            "frame_index": "integer",
+            "image_label": "string — e.g. A1",
+            "source_frame_a_label": "string — e.g. A1",
+            "source_frame_b_label": "string or null — e.g. A2",
+            "raw_frame_a_url": "string — S3 public URL",
+            "raw_frame_b_url": "string or null — S3 public URL",
+            "stitched_image_url": "string — S3 public URL",
+            "annotated_image_url": "string — S3 public URL (same as stitched until Gemini enabled)",
+            "overall_result": "pass | fail | review",
+            "weld_quality_score": "float 0–100 (0.0 until Gemini enabled)",
+            "defects": [],
+            "model_notes": "string"
+          }
+        ],
+        "statistical_summary": {
+          "total_pairs": "integer",
+          "pass_count": "integer",
+          "fail_count": "integer",
+          "review_count": "integer",
+          "avg_quality_score": "float",
+          "total_defects_found": "integer",
+          "overall_compliance_aws": "boolean",
+          "overall_compliance_iso": "boolean"
+        },
+        "processing_time_seconds": "float",
+        "analyzed_at": "ISO 8601 datetime"
+      }
+    },
+
+    "2_list_all_sessions": {
+      "method": "GET",
+      "path": "/api/v1/inspections/sessions",
+      "description": "List all inspection sessions, most recent first.",
+      "query_params": {
+        "limit":  {"type": "integer", "default": 20, "max": 100},
+        "offset": {"type": "integer", "default": 0},
+        "status": {"type": "string", "optional": true, "values": ["processing", "completed", "failed"]}
+      },
+      "response_200": {
+        "success": true,
+        "count": "integer",
+        "sessions": [
+          {
+            "session_id": "string (UUID)",
+            "object_id": "string",
+            "object_name": "string or null",
+            "scan_number": "string or null",
+            "side": "string or null",
+            "frames_extracted": "integer",
+            "avg_quality_score": "float or null",
+            "total_defects_found": "integer",
+            "overall_compliance_aws": "boolean",
+            "overall_compliance_iso": "boolean",
+            "status": "processing | completed | failed",
+            "compile_chart_url": "string or null",
+            "created_at": "ISO 8601 datetime",
+            "completed_at": "ISO 8601 datetime or null"
+          }
+        ]
+      }
+    },
+
+    "3_view_session_images": {
+      "method": "GET",
+      "path": "/api/v1/inspections/sessions/{session_id}",
+      "description": "Get full detail of one inspection session including all frame images and defects.",
+      "path_params": {
+        "session_id": "string (UUID) — from the POST /video response"
+      },
+      "response_200": {
+        "session": "SessionSummary object (same as list)",
+        "per_pair_results": "array of FramePairResult (same structure as POST response)",
+        "statistical_summary": "StatisticalSummary object"
+      }
+    },
+
+    "4_sessions_by_object": {
+      "method": "GET",
+      "path": "/api/v1/inspections/sessions/object/{object_id}",
+      "description": "Get all inspection sessions for a specific weld object (all scans of the same pipe/joint).",
+      "path_params": {
+        "object_id": "string — e.g. 'A'"
+      },
+      "response_200": {
+        "success": true,
+        "object_id": "string",
+        "count": "integer",
+        "sessions": "array of SessionSummary"
+      },
+      "response_404": {
+        "detail": "No sessions found for object_id 'X'"
+      }
+    },
+
+    "health": {
+      "method": "GET",
+      "path": "/health",
+      "response_200": {"status": "healthy", "service": "WeldVision API", "version": "2.0.0"}
+    }
+  },
+
+  "swift_multipart_example": {
+    "_note": "How to call POST /video from Swift",
+    "code_sketch": [
+      "var request = URLRequest(url: URL(string: baseURL + '/api/v1/inspections/video')!)",
+      "request.httpMethod = 'POST'",
+      "let boundary = UUID().uuidString",
+      "request.setValue('multipart/form-data; boundary=\\(boundary)', forHTTPHeaderField: 'Content-Type')",
+      "// Append form fields: object_id, object_name, scan_number, side …",
+      "// For each trimmed UIImage:",
+      "//   let data = image.jpegData(compressionQuality: 0.85)!",
+      "//   append as 'images' field with filename 'frameN.jpg' and content-type 'image/jpeg'",
+      "// Send request → decode VideoInspectionResponse"
+    ]
+  },
+
+  "env_vars_needed": {
+    "GEMINI_API_KEY":        "Google Gemini API key (keep set even though disabled — needed when re-enabled)",
+    "AWS_ACCESS_KEY_ID":     "IAM user access key",
+    "AWS_SECRET_ACCESS_KEY": "IAM user secret key",
+    "AWS_REGION":            "ap-south-1",
+    "AWS_S3_BUCKET":         "Your S3 bucket name",
+    "DATABASE_URL":          "postgresql+asyncpg://user:pass@host:5432/weldvision"
+  }
+}
