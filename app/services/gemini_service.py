@@ -206,6 +206,7 @@ class GeminiService:
             generation_config=genai.GenerationConfig(
                 temperature=0.1,
                 max_output_tokens=8192,
+                response_mime_type="application/json",
             ),
         )
         elapsed = round(time.time() - start, 2)
