@@ -267,19 +267,31 @@ class GeminiService:
         for d in raw.get("defects", []):
             bb = d.get("bounding_box")
             try:
+                if isinstance(bb, list) and len(bb) >= 4:
+                    bb = {"x": bb[0], "y": bb[1], "width": bb[2], "height": bb[3]}
+                
                 # Clamp bounding box values to valid range
-                if bb:
+                if isinstance(bb, dict):
                     bb = {
                         "x": max(0.0, min(1.0, float(bb.get("x", 0)))),
                         "y": max(0.0, min(1.0, float(bb.get("y", 0)))),
                         "width": max(0.01, min(1.0, float(bb.get("width", 0.1)))),
                         "height": max(0.01, min(1.0, float(bb.get("height", 0.1)))),
                     }
+                else:
+                    bb = None
+                
+                sev_raw = str(d.get("severity", "medium")).lower()
+                if "crit" in sev_raw: sev = "critical"
+                elif "high" in sev_raw: sev = "high"
+                elif "low" in sev_raw: sev = "low"
+                else: sev = "medium"
+
                 defects.append(Defect(
                     defect_id=str(d.get("defect_id", str(uuid.uuid4())[:8])),
                     type=str(d.get("type", "Unknown")),
                     label=d.get("label"),
-                    severity=DefectSeverity(d.get("severity", "medium")),
+                    severity=DefectSeverity(sev),
                     description=str(d.get("description", "")),
                     confidence=float(d.get("confidence", 0.8)),
                     bounding_box=BoundingBox(**bb) if bb else None,
@@ -309,6 +321,11 @@ class GeminiService:
                 logger.warning(f"Skipping malformed compliance entry: {e}")
                 continue
 
+        raw_overall = str(raw.get("overall_result", "review")).lower()
+        if "pass" in raw_overall: overall = "pass"
+        elif "fail" in raw_overall: overall = "fail"
+        else: overall = "review"
+
         return FramePairResult(
             frame_index=frame_index,
             image_label=image_label,
@@ -320,7 +337,7 @@ class GeminiService:
             raw_frame_b_url=raw_frame_b_url,
             stitched_image_url=stitched_image_url,
             annotated_image_url=annotated_image_url,
-            overall_result=OverallResult(raw.get("overall_result", "review")),
+            overall_result=OverallResult(overall),
             weld_quality_score=float(raw.get("weld_quality_score", 0.0)),
             defects=defects,
             defect_summary=raw.get("defect_summary", {}),
