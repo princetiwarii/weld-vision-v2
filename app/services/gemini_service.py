@@ -30,57 +30,27 @@ genai.configure(api_key=settings.GEMINI_API_KEY)
 # Unified prompt — validation + analysis in one call (token-optimised)
 # ---------------------------------------------------------------------------
 WELD_INSPECTION_PROMPT = """\
-Analyze the provided welding image(s) and determine whether a weld is present. If welding is detected, inspect the weld surface for the following defects:
-Undercut
-Underfill
-Excess Reinforcement
-Blowholes
-Spatters
-Lack of Fusion / Lack of Penetration (if visible)
-Porosity
-Any other visible weld defect
+Analyze the provided welding image. Inspect the weld area for the following defects:
+- Blowhole / Porosity
+- Excess Reinforcement
+- Undercut
+- Underfill
+- Spatters
+- Any other visible weld defect
 
-Use the measurement scale visible in the image to calculate actual dimensions. For each detected defect, determine:
-Defect type
-Quantity and/or length (in mm)
-Start and end location along the weld
-Severity
-ISO compliance status (Pass/Fail)
-Remarks
+Use the measurement scale visible in the image to estimate dimensions.
+For point defects (like Blowholes and Spatters), group them into clusters if there are many and provide an estimated count.
+For linear defects (like Undercut, Underfill, Excess Reinforcement), estimate their length in mm.
 
-# (Note: The defect summary and ISO compliance details must be output strictly as structured JSON fields below, do NOT generate a text/markdown table).
-
-Inspection Rules:
-If all inspected parameters are within acceptable limits, mark the weld as GOOD.
-If any defect exceeds acceptable limits, mark the weld as NOT OK and provide details.
-Count all blowholes, porosity clusters, and spatters.
-Measure total length of undercut, underfill, excess reinforcement, and other linear defects.
-Reference ISO welding quality requirements wherever applicable.
-Mark and label every detected defect directly on the image.
-If multiple images are provided, create one consolidated output image containing all marked defects and annotations.
-
-Provide a final inspection summary including:
-Overall Weld Status (GOOD / NOT OK)
-Total Defect Count
-Total Defect Lengths
-Compliance Assessment
-Recommended Corrective Actions
-
-===================================================================
 SYSTEM OVERRIDE FOR API INTEGRATION:
-To fulfill the above requirements through our programmatic UI and rendering engine, you MUST output ONLY valid JSON.
-Do NOT output markdown. Do NOT output a literal text table. 
-Our Python backend will draw the labels directly onto the image using the `bounding_box` coordinates you provide (0.0 to 1.0 relative, where x=0 is left, x=1 is right).
-
-CRITICAL PERFORMANCE RULE:
-DO NOT list every single spatter or blowhole individually! If there are 100 spatters, group them into a SINGLE defect object that covers the main cluster, and use `estimated_count` to specify the quantity.
+To fulfill the requirements for our rendering engine, you MUST output ONLY valid JSON.
+Do NOT output markdown. Do NOT output a literal text table. Our Python backend will automatically generate the table and draw the labels directly onto the image using the `bounding_box` coordinates you provide (0.0 to 1.0 relative, where x=0 is left, y=0 is top, x=1 is right, y=1 is bottom).
 
 Required JSON format:
 {
   "valid": true,
   "overall_result": "pass"|"fail"|"review",
   "weld_quality_score": 90,
-  "total_weld_length_mm": 400.0,
   "defects": [
     {
       "defect_id": "Seq 1",
@@ -88,21 +58,11 @@ Required JSON format:
       "label": "<Defect Type>",
       "description": "<Remarks>",
       "severity": "low"|"medium"|"high"|"critical",
-      "estimated_count": "<Quantity>",
+      "estimated_count": "<Quantity if applicable>",
       "length_mm": 10.5,
-      "position": "<Location From-To>",
-      "standards_reference": "<ISO Compliance Status>",
       "bounding_box": {"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
     }
-  ],
-  "defect_summary": {"Total Defect Count": 5},
-  "standards_compliance": [
-    {"standard": "ISO", "grade": null, "compliant": false, "notes": "<Compliance Assessment>"}
-  ],
-  "recommendations": [
-    "<Recommended Corrective Actions>"
-  ],
-  "model_notes": "<Overall Weld Status, Total Defect Lengths, etc.>"
+  ]
 }
 """
 
