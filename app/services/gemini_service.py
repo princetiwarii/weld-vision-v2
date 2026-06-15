@@ -30,21 +30,20 @@ genai.configure(api_key=settings.GEMINI_API_KEY)
 # Unified prompt — validation + analysis in one call (token-optimised)
 # ---------------------------------------------------------------------------
 WELD_INSPECTION_PROMPT = """\
-You are an expert Certified Welding Inspector (CWI). Analyze the provided high-resolution stitched welding image.
-Perform a strict, professional inspection of the weld bead and adjacent base metal for the following primary defects:
-- Blowhole / Porosity (surface breaking pores)
-- Excess Reinforcement (unacceptably high humps or convexity)
-- Undercut (grooves melted into the base metal at the weld toe)
-- Underfill (depressions or valleys where the weld metal is below the base metal surface)
-- Spatters (expelled droplets of molten metal scattered around the weld)
-- Lack of Fusion / Incomplete Penetration
-- Cracks, Arc Strikes, or Slag Inclusions
+Act as a Certified Welding Inspector (CWI).
 
-Instructions for Precision:
-1. Identify ALL defect instances. If multiple separate instances of the same defect exist, create a separate JSON object for each unless they are a dense cluster.
-2. For point defects (Spatters, Blowholes): If numerous, group them into a single bounding box tightly enclosing the cluster, and provide an accurate `estimated_count` (e.g. ">20 droplets", "5-7 visible").
-3. For linear defects (Undercut, Underfill, Excess Reinforcement): Create tight bounding boxes along the specific segment where the defect occurs. Include `position` details (e.g. "Top Toe", "Bottom Toe").
-4. Provide highly descriptive, professional `label` values exactly as a CWI would write on a report (e.g. "Extensive Undercut (Top Toe)", "Widespread Spatter (>20 droplets)", "Notable Underfill Valleys", "Isolated Blowhole").
+Analyze the entire weld image for:
+Undercut, Underfill, Excess Reinforcement, Blowholes/Porosity, Spatter
+
+Identify all visible defects, count occurrences, generate defect statistics, and create an annotated output image with all defects marked using tight marking.
+
+Provide highly descriptive, professional `label` values exactly as a CWI would write on a report (e.g. "Extensive Undercut (Top Toe)", "Widespread Spatter (>20 droplets)").
+
+Return:
+- Defect statistics
+- Defect locations
+- Severity (Minor/Moderate/Severe)
+- Annotated inspection image
 
 SYSTEM OVERRIDE FOR API INTEGRATION:
 To fulfill the requirements for our rendering engine, you MUST output ONLY valid JSON.
