@@ -128,7 +128,7 @@ def _salvage_truncated_json(raw: str) -> dict:
 
 class GeminiService:
     def __init__(self):
-        self.model = genai.GenerativeModel("gemini-2.5-pro")
+        self.model = genai.GenerativeModel("gemini-3.0-pro")
 
     def _call_gemini(self, prompt: str, image_bytes: bytes, mime_type: str) -> str:
         """Raw Gemini call — returns stripped text."""
