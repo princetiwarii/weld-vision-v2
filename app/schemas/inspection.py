@@ -141,6 +141,16 @@ class VideoInspectionResponse(BaseModel):
     analyzed_at:             datetime
 
 
+class VideoUploadResponse(BaseModel):
+    success:              bool = True
+    message:              str
+    session_id:           str
+    object_id:            str
+    frames_extracted:     int
+    frame_pairs_stitched: int
+    status:               str = "pending"
+
+
 # ---------------------------------------------------------------------------
 # Session retrieval
 # ---------------------------------------------------------------------------

@@ -67,6 +67,18 @@ class S3Service:
                 detail=f"S3 upload failed: {str(e)}",
             )
 
+    def download_bytes(self, key: str) -> bytes:
+        """Download raw bytes from S3."""
+        try:
+            response = self.client.get_object(Bucket=self.bucket, Key=key)
+            return response["Body"].read()
+        except ClientError as e:
+            logger.error(f"S3 download failed [{key}]: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"S3 download failed: {str(e)}",
+            )
+
     def delete_prefix(self, prefix: str) -> int:
         """
         Deletes all objects in the bucket that start with the given prefix.
