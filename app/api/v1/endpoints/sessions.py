@@ -6,7 +6,7 @@ GET /api/v1/inspections/sessions/object/{object_id} — all scans for one object
 import time
 from datetime import datetime, timezone
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from sqlalchemy.orm import selectinload
@@ -310,7 +310,6 @@ async def list_sessions(
 )
 async def sessions_by_object(
     object_id: str,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     q = (
@@ -336,10 +335,25 @@ async def sessions_by_object(
 
     for session in sessions:
         if session.status == "pending":
-            logger.info(f"[{session.session_id}] Session is pending. Launching Background Task via object_id...")
+            logger.info(f"[{session.session_id}] Session is pending. Running AI Pipeline synchronously...")
             session.status = "processing"
-            status_changed = True
-            background_tasks.add_task(_run_ai_pipeline_background, session.session_id)
+            await db.commit()
+            
+            await _run_ai_pipeline_background(session.session_id)
+            
+            # Re-fetch the session after background task completes
+            q_refresh = (
+                select(InspectionSession)
+                .where(InspectionSession.session_id == session.session_id)
+                .options(
+                    selectinload(InspectionSession.frames)
+                    .selectinload(InspectionFrame.defects)
+                )
+            )
+            res = await db.execute(q_refresh)
+            session = res.scalar_one_or_none()
+            if not session:
+                continue
 
         pair_results = [_orm_frame_to_schema(f) for f in sorted(session.frames, key=lambda x: x.frame_index)]
         summary = compute_statistics(pair_results) if pair_results and session.status == "completed" else None
@@ -347,13 +361,11 @@ async def sessions_by_object(
         session_details.append(
             SessionDetailResponse(
                 session=_orm_session_to_summary(session),
+                compile_chart_url=session.compile_chart_url,
                 per_pair_results=pair_results,
                 statistical_summary=summary,
             )
         )
-
-    if status_changed:
-        await db.commit()
 
     return {
         "success": True,
@@ -373,7 +385,6 @@ async def sessions_by_object(
 )
 async def get_session(
     session_id: str,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     q = (
@@ -394,17 +405,24 @@ async def get_session(
         )
 
     if session.status == "pending":
-        logger.info(f"[{session_id}] Session is pending. Launching Background Task...")
+        logger.info(f"[{session_id}] Session is pending. Running AI Pipeline synchronously...")
         session.status = "processing"
         await db.commit()
         
-        background_tasks.add_task(_run_ai_pipeline_background, session_id)
+        await _run_ai_pipeline_background(session_id)
+        
+        # Re-fetch session
+        res = await db.execute(q)
+        session = res.scalar_one_or_none()
+        if not session:
+            raise HTTPException(status_code=404, detail="Session lost during processing.")
 
     pair_results = [_orm_frame_to_schema(f) for f in sorted(session.frames, key=lambda x: x.frame_index)]
     summary      = compute_statistics(pair_results) if pair_results and session.status == "completed" else None
 
     return SessionDetailResponse(
         session=_orm_session_to_summary(session),
+        compile_chart_url=session.compile_chart_url,
         per_pair_results=pair_results,
         statistical_summary=summary,
     )

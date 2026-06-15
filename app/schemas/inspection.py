@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
@@ -59,6 +59,7 @@ class WeldingStandardsCompliance(BaseModel):
 # Per-frame (stitched pair) result
 # ---------------------------------------------------------------------------
 class FramePairResult(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     frame_index:          int
     image_label:          str               # e.g. "A1" (the pair label)
     source_frame_a_label: str               # e.g. "A1"
@@ -189,6 +190,7 @@ class SessionDetailResponse(BaseModel):
     """Full detail of a completed session — fetched from Postgres."""
     success:                bool = True
     session:                SessionSummary
+    compile_chart_url:      Optional[str] = None
     per_pair_results:       List[FramePairResult]
     statistical_summary:    Optional[StatisticalSummary] = None
 
@@ -206,6 +208,7 @@ class ErrorResponse(BaseModel):
 # Re-Inspection (fresh Gemini run on existing stitched images)
 # ---------------------------------------------------------------------------
 class ReinspectFrameResult(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     frame_index:         int
     image_label:         str
     stitched_image_url:  str            # original URL from DB (unchanged)

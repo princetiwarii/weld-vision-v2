@@ -432,7 +432,7 @@ def annotate_image(image_bytes: bytes, defects: List[Defect]) -> bytes:
         for d in defects:
             grouped_defects[d.type.lower().strip()].append(d)
 
-        for t, defect_group in grouped_defects.items():
+        for i, (t, defect_group) in enumerate(grouped_defects.items()):
             if not defect_group:
                 continue
 
