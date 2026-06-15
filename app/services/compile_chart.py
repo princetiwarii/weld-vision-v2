@@ -296,10 +296,12 @@ def build_compile_chart(
                 scaled_h = int(target_w * aspect)
 
                 if scaled_h >= CARD_IMG_H:
-                    # Image is taller than card slot — scale to card_w width, then center-crop vertically
-                    weld_img = weld_img.resize((target_w, scaled_h), Image.LANCZOS)
-                    top = (scaled_h - CARD_IMG_H) // 2
-                    weld_img = weld_img.crop((0, top, target_w, top + CARD_IMG_H))
+                    # Image is taller than card slot — scale down to CARD_IMG_H height and pad width
+                    scaled_w = int(CARD_IMG_H * orig_w / orig_h) if orig_h > 0 else target_w
+                    weld_img = weld_img.resize((scaled_w, CARD_IMG_H), Image.LANCZOS)
+                    padded = Image.new("RGB", (card_w, CARD_IMG_H), (10, 12, 20))
+                    padded.paste(weld_img, ((card_w - scaled_w) // 2, 0))
+                    weld_img = padded
                 else:
                     # Image is shorter than card slot — scale to CARD_IMG_H height
                     scaled_w = int(CARD_IMG_H * orig_w / orig_h) if orig_h > 0 else target_w

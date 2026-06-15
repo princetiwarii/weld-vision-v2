@@ -1,19 +1,21 @@
 """
-Point Cloud (.plv) File Upload API
+Point Cloud (.ply / .plv) File Upload API
 ====================================
 POST /api/v1/pointclouds/upload
-    Accept a .plv file + form metadata → upload to S3 → save to PostgreSQL
+    Accept a .ply file + form metadata → upload to S3 → save to PostgreSQL
 
 GET /api/v1/pointclouds/{object_id}
-    List all PLV scans stored for an object_id (most recent first)
+    List all point cloud scans stored for an object_id (most recent first)
 
 GET /api/v1/pointclouds/download/{scan_id}
     Return a presigned S3 download URL (valid 1 hour) for a specific scan
 
-No .plv content is parsed — this is purely a storage and retrieval API.
-AI analysis of point cloud data will be added in a future iteration.
+.ply files will be processed automatically to calculate bounding box dimensions and generate a mesh.
 """
+import os
 import uuid
+import tempfile
+import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -35,21 +37,21 @@ from app.services.s3_service import s3_service
 router = APIRouter()
 
 # Maximum allowed file size: 500 MB
-MAX_PLV_SIZE_BYTES = 500 * 1024 * 1024
+MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024
 
 # Accepted file extensions
-ALLOWED_EXTENSIONS = {".plv"}
+ALLOWED_EXTENSIONS = {".plv", ".ply"}
 
 
-def _validate_plv_file(filename: str, size: int) -> None:
-    """Validate that the uploaded file is a .plv file within size limits."""
+def _validate_pointcloud_file(filename: str, size: int) -> None:
+    """Validate that the uploaded file is a .ply or .plv file within size limits."""
     ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Only .plv files are accepted. Got: '{ext or 'no extension'}'",
+            detail=f"Only .ply and .plv files are accepted. Got: '{ext or 'no extension'}'",
         )
-    if size > MAX_PLV_SIZE_BYTES:
+    if size > MAX_FILE_SIZE_BYTES:
         mb = size / (1024 * 1024)
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -68,6 +70,11 @@ def _orm_to_summary(scan: PointCloudScan) -> PointCloudScanSummary:
         linked_session_id=scan.linked_session_id,
         original_filename=scan.original_filename,
         file_size_bytes=scan.file_size_bytes,
+        length_mm=scan.length_mm,
+        width_mm=scan.width_mm,
+        height_mm=scan.height_mm,
+        point_count=scan.point_count,
+        mesh_s3_url=scan.mesh_s3_url,
         s3_url=scan.s3_url,
         status=scan.status,
         created_at=scan.created_at,
@@ -81,16 +88,16 @@ def _orm_to_summary(scan: PointCloudScan) -> PointCloudScanSummary:
     "/upload",
     response_model=PointCloudUploadResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Upload a .plv point cloud file",
+    summary="Upload a .ply point cloud file",
     description=(
-        "Accepts a `.plv` point cloud file from a 3D/LiDAR scanner along with "
+        "Accepts a `.ply` point cloud file from a 3D/LiDAR scanner along with "
         "form metadata. The file is uploaded to AWS S3 and metadata is persisted "
-        "to PostgreSQL. No content parsing is performed — storage only. "
+        "to PostgreSQL. `.ply` files will be automatically analyzed to extract dimensions. "
         "Maximum file size: **500 MB**."
     ),
 )
 async def upload_point_cloud(
-    file: UploadFile = File(..., description="The .plv point cloud file"),
+    file: UploadFile = File(..., description="The .ply point cloud file"),
     object_id: str = Form(..., description="Weld object ID (e.g. 'A'). Used to group scans."),
     object_name: Optional[str] = Form(None, description="Human-readable object name"),
     scan_number: Optional[str] = Form(None, description="Scan / inspection number"),
@@ -100,18 +107,19 @@ async def upload_point_cloud(
     linked_session_id: Optional[str] = Form(
         None,
         description=(
-            "Optional: link this PLV scan to an existing InspectionSession "
+            "Optional: link this scan to an existing InspectionSession "
             "(session_id from a previous video inspection of the same weld)."
         ),
     ),
+    is_large_object: bool = Form(False, description="Skip table/support plane filtering if True"),
     db: AsyncSession = Depends(get_db),
 ):
     object_id = object_id.strip().upper()
     scan_id = str(uuid.uuid4())
-    filename = file.filename or f"{object_id}_scan.plv"
+    filename = file.filename or f"{object_id}_scan.ply"
 
     logger.info(
-        f"PLV upload START | object_id={object_id} | file={filename} | scan_id={scan_id}"
+        f"Point cloud upload START | object_id={object_id} | file={filename} | scan_id={scan_id}"
     )
 
     # Read the file into memory
@@ -119,7 +127,39 @@ async def upload_point_cloud(
     file_size = len(raw_bytes)
 
     # Validate
-    _validate_plv_file(filename, file_size)
+    _validate_pointcloud_file(filename, file_size)
+
+    # PROCESS POINT CLOUD using Open3D
+    measurements = {}
+    mesh_s3_url = None
+    if filename.lower().endswith(".ply"):
+        from app.services.pointcloud_service import process_point_cloud
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_ply_path = os.path.join(temp_dir, filename)
+            with open(temp_ply_path, "wb") as f:
+                f.write(raw_bytes)
+            
+            try:
+                measurements, mesh_path = await asyncio.to_thread(
+                    process_point_cloud,
+                    ply_path=temp_ply_path,
+                    is_large_object=is_large_object,
+                    output_dir=temp_dir
+                )
+                
+                # Upload mesh if generated
+                if mesh_path and os.path.exists(mesh_path):
+                    with open(mesh_path, "rb") as mf:
+                        mesh_bytes = mf.read()
+                    
+                    mesh_s3_key = f"pointclouds/{object_id}/{scan_id}/mesh_{filename}"
+                    mesh_s3_url = s3_service.upload_bytes(
+                        data=mesh_bytes,
+                        key=mesh_s3_key,
+                        content_type="application/octet-stream",
+                    )
+            except Exception as e:
+                logger.error(f"Failed to process point cloud: {e}")
 
     # Upload to S3
     s3_key = f"pointclouds/{object_id}/{scan_id}/{filename}"
@@ -128,7 +168,7 @@ async def upload_point_cloud(
         key=s3_key,
         content_type="application/octet-stream",
     )
-    logger.info(f"PLV uploaded to S3 → {s3_key} ({file_size / 1024 / 1024:.2f} MB)")
+    logger.info(f"Point cloud uploaded to S3 → {s3_key} ({file_size / 1024 / 1024:.2f} MB)")
 
     # Persist to DB
     db_scan = PointCloudScan(
@@ -142,6 +182,11 @@ async def upload_point_cloud(
         linked_session_id=linked_session_id,
         original_filename=filename,
         file_size_bytes=file_size,
+        length_mm=measurements.get("length_mm"),
+        width_mm=measurements.get("width_mm"),
+        height_mm=measurements.get("height_mm"),
+        point_count=measurements.get("point_count"),
+        mesh_s3_url=mesh_s3_url,
         s3_key=s3_key,
         s3_url=s3_url,
         status="uploaded",
@@ -150,7 +195,7 @@ async def upload_point_cloud(
     await db.commit()
     await db.refresh(db_scan)
 
-    logger.info(f"PLV upload DONE | scan_id={scan_id} | object_id={object_id}")
+    logger.info(f"Point cloud upload DONE | scan_id={scan_id} | object_id={object_id}")
 
     return PointCloudUploadResponse(
         success=True,
@@ -163,6 +208,11 @@ async def upload_point_cloud(
         linked_session_id=linked_session_id,
         original_filename=filename,
         file_size_bytes=file_size,
+        length_mm=measurements.get("length_mm"),
+        width_mm=measurements.get("width_mm"),
+        height_mm=measurements.get("height_mm"),
+        point_count=measurements.get("point_count"),
+        mesh_s3_url=mesh_s3_url,
         s3_url=s3_url,
         status="uploaded",
         created_at=db_scan.created_at,
@@ -215,10 +265,10 @@ async def list_point_clouds(
 @router.get(
     "/download/{scan_id}",
     response_model=PointCloudDownloadResponse,
-    summary="Get a presigned download URL for a .plv scan (valid 1 hour)",
+    summary="Get a presigned download URL for a .ply scan (valid 1 hour)",
     description=(
         "Since the S3 bucket is private, this endpoint generates a temporary "
-        "presigned URL that allows the caller to download the `.plv` file "
+        "presigned URL that allows the caller to download the `.ply` file "
         "directly from S3 for up to 1 hour."
     ),
 )

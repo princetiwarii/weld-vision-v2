@@ -219,10 +219,10 @@ class ReinspectResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Point Cloud (.plv) schemas
+# Point Cloud (.ply/.plv) schemas
 # ---------------------------------------------------------------------------
 class PointCloudUploadResponse(BaseModel):
-    """Returned after a successful .plv file upload."""
+    """Returned after a successful .ply file upload."""
     success:           bool = True
     scan_id:           str
     object_id:         str
@@ -233,6 +233,11 @@ class PointCloudUploadResponse(BaseModel):
     linked_session_id: Optional[str] = None
     original_filename: str
     file_size_bytes:   int
+    length_mm:         Optional[float] = None
+    width_mm:          Optional[float] = None
+    height_mm:         Optional[float] = None
+    point_count:       Optional[int] = None
+    mesh_s3_url:       Optional[str] = None
     s3_url:            str
     status:            str
     created_at:        datetime
@@ -249,13 +254,18 @@ class PointCloudScanSummary(BaseModel):
     linked_session_id: Optional[str]
     original_filename: str
     file_size_bytes:   Optional[int]
+    length_mm:         Optional[float]
+    width_mm:          Optional[float]
+    height_mm:         Optional[float]
+    point_count:       Optional[int]
+    mesh_s3_url:       Optional[str]
     s3_url:            str
     status:            str
     created_at:        datetime
 
 
 class PointCloudListResponse(BaseModel):
-    """List of all PLV scans for an object_id."""
+    """List of all point cloud scans for an object_id."""
     success:   bool = True
     object_id: str
     count:     int
@@ -263,7 +273,7 @@ class PointCloudListResponse(BaseModel):
 
 
 class PointCloudDownloadResponse(BaseModel):
-    """Presigned download URL for a specific PLV scan (valid 1 hour)."""
+    """Presigned download URL for a specific point cloud scan (valid 1 hour)."""
     success:           bool = True
     scan_id:           str
     original_filename: str

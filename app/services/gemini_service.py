@@ -27,111 +27,83 @@ from loguru import logger
 genai.configure(api_key=settings.GEMINI_API_KEY)
 
 # ---------------------------------------------------------------------------
-# Weld validation prompt — fast pre-check before full analysis
+# Unified prompt — validation + analysis in one call (token-optimised)
 # ---------------------------------------------------------------------------
-WELD_VALIDATION_PROMPT = """\
-You are a weld inspection system. Your ONLY job right now is to determine whether this image shows a welded joint or weld bead on metal.
+WELD_INSPECTION_PROMPT = """\
+Analyze the provided welding image(s) and determine whether a weld is present. If welding is detected, inspect the weld surface for the following defects:
+Undercut
+Underfill
+Excess Reinforcement
+Blowholes
+Spatters
+Lack of Fusion / Lack of Penetration (if visible)
+Porosity
+Any other visible weld defect
 
-A valid weld image shows: a visible weld bead/seam on metal base plate, possibly with defects like porosity, undercut, spatter, etc.
-An INVALID image is: a person, landscape, document, QR code, screenshot, chart, face, vehicle, food, random object, or anything that is NOT a welded metal joint.
+Use the measurement scale visible in the image to calculate actual dimensions. For each detected defect, determine:
+Defect type
+Quantity and/or length (in mm)
+Start and end location along the weld
+Severity
+ISO compliance status (Pass/Fail)
+Remarks
 
-Respond ONLY with this exact JSON — no preamble, no markdown:
-{"is_weld_image": true or false, "reason": "<one sentence max>"}
-"""
+# (Note: The defect summary and ISO compliance details must be output strictly as structured JSON fields below, do NOT generate a text/markdown table).
 
-# ---------------------------------------------------------------------------
-# Main analysis prompt
-# ---------------------------------------------------------------------------
-WELD_ANALYSIS_PROMPT = """\
-Role: You are a Certified Welding Inspector (CWI) and Quality Assurance Expert performing a visual surface inspection.
+Inspection Rules:
+If all inspected parameters are within acceptable limits, mark the weld as GOOD.
+If any defect exceeds acceptable limits, mark the weld as NOT OK and provide details.
+Count all blowholes, porosity clusters, and spatters.
+Measure total length of undercut, underfill, excess reinforcement, and other linear defects.
+Reference ISO welding quality requirements wherever applicable.
+Mark and label every detected defect directly on the image.
+If multiple images are provided, create one consolidated output image containing all marked defects and annotations.
 
-Image layout: The image is a STITCHED pair of adjacent weld video frames joined side-by-side. Treat the entire image as ONE continuous weld segment. The left half is Frame A, the right half is Frame B.
+Provide a final inspection summary including:
+Overall Weld Status (GOOD / NOT OK)
+Total Defect Count
+Total Defect Lengths
+Compliance Assessment
+Recommended Corrective Actions
 
-════════════════════════════════════════════════════════════
-DEFECT IDENTIFICATION CRITERIA (strict colour-coded legend)
-════════════════════════════════════════════════════════════
+===================================================================
+SYSTEM OVERRIDE FOR API INTEGRATION:
+To fulfill the above requirements through our programmatic UI and rendering engine, you MUST output ONLY valid JSON.
+Do NOT output markdown. Do NOT output a literal text table. 
+Our Python backend will draw the labels directly onto the image using the `bounding_box` coordinates you provide (0.0 to 1.0 relative, where x=0 is left, x=1 is right).
 
-🔴 RED — Blowholes / Surface Porosity
-  Visible as: round pinholes, open craters, or clusters of surface pores on the weld face.
-  Label format: "Surface Porosity, est. X-Y visible" or "Blowholes (X visible)"
-  Severity rule: ≤3 pores = medium; 4-9 = high; ≥10 = critical
+CRITICAL PERFORMANCE RULE:
+DO NOT list every single spatter or blowhole individually! If there are 100 spatters, group them into a SINGLE defect object that covers the main cluster, and use `estimated_count` to specify the quantity.
 
-🟠 ORANGE — Undercut
-  Visible as: a groove or channel melted into the base metal along the weld toe, running parallel to the weld bead.
-  Label format: "Extensive Undercut (Top Toe)", "Undercut Segments (Top & Bottom Toes)"
-  Note: Specify EXACTLY which toe(s) are affected. Top toe = top edge of weld; Bottom toe = bottom edge.
-  Severity rule: <10mm = low; 10-30mm = medium; >30mm = high or critical
-
-🔵 BLUE — Underfill
-  Visible as: a depression or valley in the weld face where the weld surface is BELOW the parent metal level.
-  Label format: "Notable Underfill Valleys" or "Underfill Depression"
-  Severity rule: shallow = low; moderate = medium; deep groove = high
-
-🟣 PURPLE — Excess Reinforcement / High Humps
-  Visible as: the weld bead rises excessively above the parent metal level, forming a tall convex hump.
-  Label format: "Excess Reinforcement (High Humps)" or "High Hump"
-  Severity rule: slight = low; moderate = medium; severe = high
-
-🟢 GREEN — Spatter
-  Visible as: scattered droplets of solidified metal around the weld zone on the base plate.
-  Label format: "Widespread Spatter (>20 droplets)" or "Spatter (est. >30 droplets)"
-  Severity rule: <10 droplets = low; 10-20 = medium; >20 = high; >50 = critical
-
-⚪ OTHER — Any other defect (cracks, burn-through, overlap, arc strike, slag inclusion, incomplete fusion):
-  Identify, describe, and map them clearly.
-
-════════════════════════════════════════════════════════════
-BOUNDING BOX RULES (CRITICAL — read carefully)
-════════════════════════════════════════════════════════════
-• All coordinates are RELATIVE (0.0 to 1.0) over the FULL stitched image width and height.
-• x=0, y=0 is the TOP-LEFT corner of the full stitched image.
-• x=0.5 is the CENTER (the seam between Frame A and Frame B).
-• Make bounding boxes TIGHT — they should closely wrap the actual defect region, not the whole image.
-• For UNDERCUT: the bounding box should span the full length of the undercut groove along the toe.
-  - Top Toe undercut: y should be small (near top of weld, e.g. 0.1 to 0.35)
-  - Bottom Toe undercut: y should be larger (near bottom of weld, e.g. 0.55 to 0.85)
-• For SPATTER: the bounding box should cover the entire region where spatter droplets are scattered.
-• For BLOWHOLES: draw one tight box per cluster of pinholes.
-• For EXCESS REINFORCEMENT: box around the high hump regions.
-• For UNDERFILL: box along the valley depression.
-
-════════════════════════════════════════════════════════════
-OUTPUT FORMAT — Return ONLY valid raw JSON, NO markdown fences
-════════════════════════════════════════════════════════════
+Required JSON format:
 {
-  "overall_result": "pass" | "fail" | "review",
-  "weld_quality_score": <0-100, where 100=perfect, 0=completely defective>,
-  "total_weld_length_mm": <estimated length in mm or null>,
+  "valid": true,
+  "overall_result": "pass"|"fail"|"review",
+  "weld_quality_score": 90,
+  "total_weld_length_mm": 400.0,
   "defects": [
     {
-      "defect_id": "D001",
-      "type": "<exact type: Blowholes, Undercut, Underfill, Excess Reinforcement, Spatter, Overlap, Crack, etc.>",
-      "label": "<display label per legend format above, max 50 chars>",
-      "severity": "low" | "medium" | "high" | "critical",
-      "description": "<precise visual description of what you see, max 120 chars>",
-      "confidence": <0.0-1.0>,
-      "estimated_count": "<e.g. 'est. 15-20 droplets' or null>",
-      "bounding_box": {"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0},
-      "length_mm": <number or null>,
-      "depth_mm": <number or null>,
-      "width_mm": <number or null>,
-      "count": <integer or null>,
-      "position": "<left section / right section / spanning both — plus weld zone location>",
-      "standards_reference": "<e.g. AWS D1.1 Clause 6.9 or ISO 5817 Level C>",
-      "recommendation": "<specific corrective action, max 100 chars>"
+      "defect_id": "Seq 1",
+      "type": "<Defect Type>",
+      "label": "<Defect Type>",
+      "description": "<Remarks>",
+      "severity": "low"|"medium"|"high"|"critical",
+      "estimated_count": "<Quantity>",
+      "length_mm": 10.5,
+      "position": "<Location From-To>",
+      "standards_reference": "<ISO Compliance Status>",
+      "bounding_box": {"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
     }
   ],
-  "defect_summary": {"Blowholes": 1, "Undercut": 2},
+  "defect_summary": {"Total Defect Count": 5},
   "standards_compliance": [
-    {"standard": "AWS D1.1", "grade": null, "compliant": true|false, "notes": "<max 80 chars>"},
-    {"standard": "ISO 5817", "grade": "B|C|D", "compliant": true|false, "notes": "<max 80 chars>"}
+    {"standard": "ISO", "grade": null, "compliant": false, "notes": "<Compliance Assessment>"}
   ],
-  "recommendations": ["<top priority action, max 80 chars>", "<second priority, max 80 chars>"],
-  "model_notes": "<left-to-right visual walkthrough of defect locations, max 150 chars>"
+  "recommendations": [
+    "<Recommended Corrective Actions>"
+  ],
+  "model_notes": "<Overall Weld Status, Total Defect Lengths, etc.>"
 }
-
-If NO defects found: empty "defects" array, empty "defect_summary", set "overall_result" to "pass", score ≥ 85.
-Scoring guide: deduct points per defect — critical=25pts, high=15pts, medium=8pts, low=3pts. Start at 100.
 """
 
 
@@ -148,7 +120,8 @@ def _salvage_truncated_json(raw: str) -> dict:
         overall  = or_match.group(1) if or_match else "review"
         score    = float(qs_match.group(1)) if qs_match else 0.0
 
-        defect_pattern = re.compile(r'\{[^{}]*"defect_id"[^{}]*\}', re.DOTALL)
+        # Allow one level of nested braces for bounding_box
+        defect_pattern = re.compile(r'\{\s*"defect_id"[\s\S]*?"bounding_box"\s*:\s*\{[^{}]*\}[\s\S]*?\}', re.DOTALL)
         raw_defects    = defect_pattern.findall(raw)
         parsed_defects = []
         for d in raw_defects:
@@ -195,7 +168,7 @@ def _salvage_truncated_json(raw: str) -> dict:
 
 class GeminiService:
     def __init__(self):
-        self.model = genai.GenerativeModel("gemini-2.5-flash")
+        self.model = genai.GenerativeModel("gemini-3.1-flash-lite")
 
     def _call_gemini(self, prompt: str, image_bytes: bytes, mime_type: str) -> str:
         """Raw Gemini call — returns stripped text."""
@@ -211,37 +184,51 @@ class GeminiService:
         )
         elapsed = round(time.time() - start, 2)
         raw = response.text.strip()
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw.rstrip())
+        logger.warning(f"RAW GEMINI OUTPUT ({len(raw)} chars):\n{raw}")
+        
+        # Aggressively extract only the JSON payload in case Gemini generates 
+        # conversational text or markdown tables outside the JSON block.
+        if "{" in raw and "}" in raw:
+            start_idx = raw.find("{")
+            end_idx = raw.rfind("}") + 1
+            raw = raw[start_idx:end_idx]
+            
         logger.info(f"Gemini responded in {elapsed}s | {len(raw)} chars")
         return raw
 
-    def validate_weld_image(self, image_bytes: bytes, mime_type: str = "image/jpeg") -> tuple[bool, str]:
+    def _call_gemini_unified(self, image_bytes: bytes, mime_type: str) -> dict:
         """
-        Returns (is_valid_weld, reason).
-        Raises HTTPException with 422 if the image is not a weld image.
+        Single Gemini call that handles both weld validation and full analysis.
+        Returns the parsed dict. Raises HTTPException(422) for non-weld images
+        and HTTPException(503) for API/parse failures.
         """
         try:
-            raw = self._call_gemini(WELD_VALIDATION_PROMPT, image_bytes, mime_type)
-            data = json.loads(raw)
-            is_weld = bool(data.get("is_weld_image", False))
-            reason = str(data.get("reason", "Unknown"))
-            return is_weld, reason
-        except Exception as e:
-            # If validation itself fails, be permissive and log
-            logger.warning(f"Weld validation check failed (permissive pass): {e}")
-            return True, "Validation check skipped"
+            raw = self._call_gemini(WELD_INSPECTION_PROMPT, image_bytes, mime_type)
+            data = _salvage_truncated_json(raw)
 
-    def _call_gemini_analysis(self, image_bytes: bytes, mime_type: str) -> dict:
-        try:
-            raw = self._call_gemini(WELD_ANALYSIS_PROMPT, image_bytes, mime_type)
-            return _salvage_truncated_json(raw)
+            # Gate check: model flagged image as non-weld
+            if not data.get("valid", True):
+                reason = data.get("reason", "Not a weld image")
+                logger.warning(f"Non-weld image rejected: {reason}")
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Image rejected: {reason}",
+                )
+
+            return data
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Gemini API call failed: {e}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=f"AI processing failed: {str(e)}",
             )
+
+    # Keep as thin shim so callers that still reference validate_weld_image don't break
+    def validate_weld_image(self, image_bytes: bytes, mime_type: str = "image/jpeg") -> tuple[bool, str]:
+        """Deprecated shim — validation now happens inside _call_gemini_unified."""
+        return True, "Validation merged into unified prompt"
 
     def analyze_pair(
         self,
@@ -261,7 +248,7 @@ class GeminiService:
         mime_type: str = "image/jpeg",
     ) -> FramePairResult:
         """Analyze a stitched frame pair and return a FramePairResult."""
-        raw = self._call_gemini_analysis(stitched_bytes, mime_type)
+        raw = self._call_gemini_unified(stitched_bytes, mime_type)
 
         defects = []
         for d in raw.get("defects", []):

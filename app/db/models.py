@@ -196,6 +196,13 @@ class PointCloudScan(Base):
     original_filename: Mapped[str] = mapped_column(String(256), nullable=False)
     file_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
+    # Point Cloud Measurements (populated after analysis)
+    length_mm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    width_mm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    height_mm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    point_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mesh_s3_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # S3 storage
     s3_key: Mapped[str] = mapped_column(String(512), nullable=False)  # for presigned URL generation
     s3_url: Mapped[str] = mapped_column(Text, nullable=False)          # public-style URL

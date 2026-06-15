@@ -74,11 +74,17 @@ LEGEND_ITEMS = [
 ]
 
 FONT_PATHS_BOLD = [
+    "C:/Windows/Fonts/arialbd.ttf",
+    "C:/Windows/Fonts/segoeuib.ttf",
+    "C:/Windows/Fonts/calibrib.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
 ]
 FONT_PATHS_REG = [
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+    "C:/Windows/Fonts/calibri.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
@@ -176,7 +182,7 @@ def _draw_arrow(
     draw.polygon(pts, fill=color, outline=(0, 0, 0))
 
 
-def _draw_wavy_line(draw, p1, p2, color, width=3, amplitude=6, frequency=0.10):
+def _draw_wavy_line(draw, p1, p2, color, width=3, amplitude=6, frequency=0.02):
     """Wavy / sine-wave line — used for Undercut along weld toe."""
     x1, y1 = p1
     x2, y2 = p2
@@ -197,7 +203,7 @@ def _draw_wavy_line(draw, p1, p2, color, width=3, amplitude=6, frequency=0.10):
     draw.line(pts, fill=color, width=width, joint="curve")
 
 
-def _draw_bumpy_polygon(draw, x1, y1, x2, y2, color, width=3, bumps=6, amplitude=8):
+def _draw_bumpy_polygon(draw, x1, y1, x2, y2, color, width=3, bumps=12, amplitude=8):
     """Bumpy / irregular closed polygon — used for Excess Reinforcement humps."""
     cx = (x1 + x2) / 2
     cy = (y1 + y2) / 2
@@ -207,8 +213,11 @@ def _draw_bumpy_polygon(draw, x1, y1, x2, y2, color, width=3, bumps=6, amplitude
     pts = []
     for i in range(steps + 1):
         angle = i * 2 * math.pi / steps
-        r_var = 1.0 + math.sin(angle * bumps) * (amplitude / max(rx, ry, 1))
-        pts.append((cx + rx * r_var * math.cos(angle), cy + ry * r_var * math.sin(angle)))
+        # Absolute pixel offset rather than a ratio, so it's always visible
+        offset = math.sin(angle * bumps) * amplitude
+        px = cx + (rx + offset) * math.cos(angle)
+        py = cy + (ry + offset) * math.sin(angle)
+        pts.append((px, py))
     draw.line(pts, fill=(0, 0, 0), width=width + 3, joint="curve")
     draw.line(pts, fill=color, width=width, joint="curve")
 
@@ -298,32 +307,62 @@ class LabelPlacer:
         th: int,
         prefer_above: bool = True,
     ) -> Tuple[int, int]:
-        """Find a non-overlapping label position near the anchor."""
-        pad = 6
-        offsets_above = [
-            (anchor_x - tw // 2, anchor_y - th - 20),
-            (anchor_x - tw // 2, anchor_y - th - 45),
-            (anchor_x - tw // 2, anchor_y - th - 70),
-            (anchor_x + 10,      anchor_y - th - 20),
-            (anchor_x - tw - 10, anchor_y - th - 20),
-        ]
-        offsets_below = [
-            (anchor_x - tw // 2, anchor_y + 20),
-            (anchor_x - tw // 2, anchor_y + 45),
-            (anchor_x + 10,      anchor_y + 20),
-        ]
-        candidates = offsets_above + offsets_below if prefer_above else offsets_below + offsets_above
+        """Find a non-overlapping label position using a dynamic outward search."""
+        pad = 12
+        
+        # Step sizes based on actual text dimensions
+        step_y = th + pad
+        step_x = max(20, int(tw * 0.2))
+        
+        candidates = []
+        
+        # Generate candidates in an expanding grid
+        for radius in range(0, 7):
+            for dy_steps in range(-radius, radius + 1):
+                for dx_steps in range(-radius, radius + 1):
+                    # Only take the outer shell of the current radius
+                    if abs(dy_steps) != radius and abs(dx_steps) != radius:
+                        continue
+                        
+                    y_off = dy_steps * step_y
+                    x_off = dx_steps * step_x
+                    
+                    # Base position centered over the offset point
+                    lx = anchor_x + x_off - (tw // 2)
+                    ly = anchor_y + y_off
+                    
+                    # Push away from the exact anchor center
+                    if dy_steps == 0:
+                        ly = anchor_y - step_y if prefer_above else anchor_y + step_y
+                        
+                    candidates.append((lx, ly))
+
+        # Sort candidates by distance to anchor (penalize the non-preferred vertical direction)
+        def score(pt):
+            lx, ly = pt
+            # Distance from label center to anchor
+            dist = math.hypot(lx + tw//2 - anchor_x, ly + th//2 - anchor_y)
+            # Add penalty if it's placed on the opposite side of preference
+            if prefer_above and ly > anchor_y:
+                dist += th * 3
+            elif not prefer_above and ly < anchor_y:
+                dist += th * 3
+            return dist
+
+        candidates.sort(key=score)
 
         for lx, ly in candidates:
+            # Clamp to image boundaries
             lx = max(pad, min(self.img_w - tw - pad, lx))
             ly = max(pad, min(self.img_h - th - pad, ly))
-            if not self._overlaps(lx, ly, tw, th):
+            
+            if not self._overlaps(lx, ly, tw, th, pad=pad):
                 self.placed.append((lx, ly, tw, th))
                 return lx, ly
 
-        # Force place (last resort)
+        # Force place (last resort) - push it way up
         lx = max(pad, min(self.img_w - tw - pad, anchor_x - tw // 2))
-        ly = max(pad, min(self.img_h - th - pad, anchor_y - th - 20))
+        ly = max(pad, min(self.img_h - th - pad, anchor_y - step_y * 2))
         self.placed.append((lx, ly, tw, th))
         return lx, ly
 
@@ -370,12 +409,8 @@ def _draw_legend(draw: ImageDraw.ImageDraw, img_w: int, img_h: int, font, defect
 
 def annotate_image(image_bytes: bytes, defects: List[Defect]) -> bytes:
     """
-    Draw color-coded defect annotations matching the CWI reference style:
-      - Shaped overlays tightly drawn over each defect
-      - Bold colored labels with black outline
-      - Arrows from label → defect centroid
-      - Non-overlapping label placement
-      - Color-coded legend bottom-right
+    Draw exact shape overlays for defects (wavy lines, bumpy polygons) with a professional, structured label system.
+    Labels are drawn as solid tags with thin pointers connecting them to the shapes, preventing visual clutter.
     """
     try:
         img  = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
@@ -391,132 +426,155 @@ def annotate_image(image_bytes: bytes, defects: List[Defect]) -> bytes:
 
         placer = LabelPlacer(w, h)
 
-        for i, defect in enumerate(defects):
-            color     = _get_defect_color(defect)
-            color255  = color + (255,)
-            t         = defect.type.lower()
+        # Group defects by type to prevent label spam
+        from collections import defaultdict
+        grouped_defects = defaultdict(list)
+        for d in defects:
+            grouped_defects[d.type.lower().strip()].append(d)
 
-            # Build label text
-            label_txt = defect.label or defect.type
-            if defect.estimated_count and defect.estimated_count not in label_txt:
-                label_txt = f"{label_txt} ({defect.estimated_count})"
-            # Truncate very long labels
+        for t, defect_group in grouped_defects.items():
+            if not defect_group:
+                continue
+
+            # Use the first defect for color and general label formatting
+            primary_defect = defect_group[0]
+            color     = _get_defect_color(primary_defect)
+            color255  = color + (255,)
+
+            # Build a consolidated label text
+            label_txt = primary_defect.label or primary_defect.type
+            total_est = 0
+            has_est = False
+            for d in defect_group:
+                if d.estimated_count:
+                    import re as _re
+                    nums = _re.findall(r'\d+', d.estimated_count)
+                    if nums:
+                        total_est += int(nums[0])
+                        has_est = True
+            
+            if has_est and str(total_est) not in label_txt:
+                label_txt = f"{label_txt} (~{total_est})"
+            elif len(defect_group) > 1 and str(len(defect_group)) not in label_txt:
+                 label_txt = f"{label_txt} ({len(defect_group)} instances)"
+            
             if len(label_txt) > 55:
                 label_txt = label_txt[:52] + "…"
 
-            bb = defect.bounding_box
+            # We will pick the largest bounding box as the main anchor for the single label
+            best_area = -1
+            best_anchor = None
+            best_bb_cx = 0
 
-            if not bb:
-                # No bounding box — place at top strip
-                lx, ly = 20, 20 + i * int(34 * scale)
-                _draw_outlined_text(draw, (lx, ly), label_txt, font=label_font,
-                                    fill=color255, outline_width=2)
-                continue
+            # Draw all shapes for this group
+            for defect in defect_group:
+                bb = defect.bounding_box
+                if not bb:
+                    continue
 
-            # Pixel coordinates from relative bounding box
-            x1 = max(0, int(bb.x * w))
-            y1 = max(0, int(bb.y * h))
-            x2 = min(w - 1, int((bb.x + bb.width) * w))
-            y2 = min(h - 1, int((bb.y + bb.height) * h))
-            # Ensure minimum size
-            if x2 - x1 < 10:
-                x2 = min(w - 1, x1 + 10)
-            if y2 - y1 < 10:
-                y2 = min(h - 1, y1 + 10)
+                x1 = max(0, int(bb.x * w))
+                y1 = max(0, int(bb.y * h))
+                x2 = min(w - 1, int((bb.x + bb.width) * w))
+                y2 = min(h - 1, int((bb.y + bb.height) * h))
+                
+                if x2 - x1 < 10: x2 = min(w - 1, x1 + 10)
+                if y2 - y1 < 10: y2 = min(h - 1, y1 + 10)
 
-            bb_cx = (x1 + x2) // 2
-            bb_cy = (y1 + y2) // 2
-            arrow_target = (bb_cx, bb_cy)
-
-            # ─────────────────────────────────────────────────────────────────
-            # Draw defect shape
-            # ─────────────────────────────────────────────────────────────────
-
-            if "undercut" in t:
-                # Wavy line along top toe AND optionally bottom toe
-                _draw_wavy_line(draw, (x1, y1), (x2, y1), color255,
-                                width=line_w + 2, amplitude=max(4, int(6 * scale)))
-                if "bottom" in (defect.position or "").lower() or "both" in (defect.position or "").lower():
-                    _draw_wavy_line(draw, (x1, y2), (x2, y2), color255,
-                                    width=line_w + 2, amplitude=max(4, int(6 * scale)))
-                arrow_target = (bb_cx, y1)
-
-            elif "underfill" in t or "valley" in t:
-                _draw_scalloped_bracket(draw, x1, y1, x2, y2, color255, width=line_w + 1)
-                arrow_target = (bb_cx, (y1 + y2) // 2)
-
-            elif "excess" in t or "reinforcement" in t or "hump" in t:
-                _draw_bumpy_polygon(draw, x1, y1, x2, y2, color255,
-                                    width=line_w + 2,
-                                    bumps=max(4, int(6 * scale)),
-                                    amplitude=max(5, int(8 * scale)))
-                arrow_target = (bb_cx, y1)
-
-            elif "blowhole" in t or "poros" in t:
-                import re as _re
-                n = 5
-                if defect.estimated_count:
-                    nums = _re.findall(r'\d+', defect.estimated_count)
-                    if nums:
-                        n = min(25, max(1, int(nums[0])))
-                centers = _draw_blowhole_circles(draw, x1, y1, x2, y2, color, n, scale, defect.defect_id)
-                arrow_target = centers[0] if centers else (bb_cx, bb_cy)
-
-            elif "spatter" in t:
-                import re as _re
-                n = 20
-                if defect.estimated_count:
-                    nums = _re.findall(r'\d+', defect.estimated_count)
-                    if nums:
-                        n = min(80, max(5, int(nums[0])))
-                _draw_spatter_dots(draw, x1, y1, x2, y2, color, n, scale, defect.defect_id)
+                bb_cx = (x1 + x2) // 2
+                bb_cy = (y1 + y2) // 2
                 arrow_target = (bb_cx, bb_cy)
 
-            elif "fusion" in t or "penetration" in t:
-                _draw_wavy_line(draw, (x1, bb_cy), (x2, bb_cy), color255,
-                                width=line_w, amplitude=max(2, int(3 * scale)), frequency=0.06)
-                arrow_target = (bb_cx, bb_cy)
+                # ─────────────────────────────────────────────────────────────────
+                # Draw EXACT Defect Shapes
+                # ─────────────────────────────────────────────────────────────────
+                if "undercut" in t:
+                    _draw_wavy_line(draw, (x1, y1), (x2, y1), color255,
+                                    width=line_w, amplitude=max(2, int(4 * scale)))
+                    if "bottom" in (defect.position or "").lower() or "both" in (defect.position or "").lower():
+                        _draw_wavy_line(draw, (x1, y2), (x2, y2), color255,
+                                        width=line_w, amplitude=max(2, int(4 * scale)))
+                    arrow_target = (bb_cx, y1)
 
-            elif "overlap" in t:
-                # Dashed horizontal line
-                seg = 18
-                gap = 8
-                cx_ = x1
-                while cx_ < x2:
-                    ex = min(cx_ + seg, x2)
-                    draw.line([(cx_, bb_cy), (ex, bb_cy)], fill=(0, 0, 0), width=line_w + 2)
-                    draw.line([(cx_, bb_cy), (ex, bb_cy)], fill=color255, width=line_w)
-                    cx_ += seg + gap
-                arrow_target = (bb_cx, bb_cy)
+                elif "underfill" in t or "valley" in t:
+                    _draw_scalloped_bracket(draw, x1, y1, x2, y2, color255, width=line_w + 1)
+                    arrow_target = (bb_cx, (y1 + y2) // 2)
 
-            else:
-                # Fallback: tight rectangle
-                draw.rectangle([x1, y1, x2, y2], outline=color255, width=line_w)
-                arrow_target = (bb_cx, bb_cy)
+                elif "excess" in t or "reinforcement" in t or "hump" in t:
+                    _draw_bumpy_polygon(draw, x1, y1, x2, y2, color255,
+                                        width=line_w, bumps=12, amplitude=max(3, int(6 * scale)))
+                    arrow_target = (bb_cx, y1)
+
+                elif "blowhole" in t or "poros" in t:
+                    import re as _re
+                    n = 5
+                    if defect.estimated_count:
+                        nums = _re.findall(r'\d+', defect.estimated_count)
+                        if nums: n = min(25, max(1, int(nums[0])))
+                    centers = _draw_blowhole_circles(draw, x1, y1, x2, y2, color, n, scale, defect.defect_id)
+                    arrow_target = centers[0] if centers else (bb_cx, bb_cy)
+
+                elif "spatter" in t:
+                    import re as _re
+                    n = 20
+                    if defect.estimated_count:
+                        nums = _re.findall(r'\d+', defect.estimated_count)
+                        if nums: n = min(80, max(5, int(nums[0])))
+                    _draw_spatter_dots(draw, x1, y1, x2, y2, color, n, scale, defect.defect_id)
+                    arrow_target = (bb_cx, bb_cy)
+
+                elif "fusion" in t or "penetration" in t:
+                    _draw_wavy_line(draw, (x1, bb_cy), (x2, bb_cy), color255,
+                                    width=line_w, amplitude=max(2, int(3 * scale)), frequency=0.06)
+                    arrow_target = (bb_cx, bb_cy)
+
+                elif "overlap" in t:
+                    seg = 18
+                    gap = 8
+                    cx_ = x1
+                    while cx_ < x2:
+                        ex = min(cx_ + seg, x2)
+                        draw.line([(cx_, bb_cy), (ex, bb_cy)], fill=color255, width=line_w + 1)
+                        cx_ += seg + gap
+                    arrow_target = (bb_cx, bb_cy)
+                else:
+                    draw.ellipse([x1, y1, x2, y2], outline=color255, width=line_w)
+                    arrow_target = (bb_cx, y1)
+
+                # Check if this is the largest region for anchoring the label
+                area = (x2 - x1) * (y2 - y1)
+                if area > best_area:
+                    best_area = area
+                    best_anchor = arrow_target
+                    best_bb_cx = bb_cx
 
             # ─────────────────────────────────────────────────────────────────
-            # Label with arrow
+            # Draw ONE Label per defect group
             # ─────────────────────────────────────────────────────────────────
-            tw, th = _text_size(draw, label_txt, label_font)
-            prefer_above = (bb_cy > h * 0.5)
-            lx, ly = placer.find_position(bb_cx, arrow_target[1], tw, th, prefer_above=prefer_above)
+            if best_anchor:
+                tw, th = _text_size(draw, label_txt, label_font)
+                pad_x, pad_y = int(8 * scale), int(4 * scale)
+                tag_w = tw + pad_x * 2
+                tag_h = th + pad_y * 2
+                
+                prefer_above = (best_anchor[1] > h * 0.5)
+                lx, ly = placer.find_position(best_bb_cx, best_anchor[1], tag_w, tag_h, prefer_above=prefer_above)
 
-            # Arrow from label center-bottom (or center-top) to defect shape
-            label_center_x = lx + tw // 2
-            if ly + th < arrow_target[1]:
-                arrow_from = (label_center_x, ly + th + 2)
-            else:
-                arrow_from = (label_center_x, ly - 2)
+                # Pointer line to the main/largest shape
+                tag_cx = lx + tag_w // 2
+                tag_cy = ly + tag_h // 2
+                draw.line([(tag_cx, tag_cy), best_anchor], fill=color + (200,), width=max(1, int(2 * scale)))
 
-            _draw_arrow(draw, arrow_from, arrow_target, color,
-                        line_width=max(2, int(2.5 * scale)),
-                        arrowhead_size=max(8, int(12 * scale)))
+                # Tag Background
+                draw.rectangle([lx, ly, lx + tag_w, ly + tag_h], fill=color + (230,))
+                
+                # Tag Text
+                _draw_outlined_text(draw, (lx + pad_x, ly + pad_y), label_txt, font=label_font, fill=(255, 255, 255, 255), outline_width=1)
+            elif not defect_group[0].bounding_box:
+                # Fallback if no bounding box for any defect in the group
+                lx, ly = 20, 20 + i * int(34 * scale) # Note: 'i' is not available here, but we can just use 20 for simplicity
+                _draw_outlined_text(draw, (lx, ly), label_txt, font=label_font, fill=color255, outline_width=2)
 
-            # Label text
-            _draw_outlined_text(draw, (lx, ly), label_txt, font=label_font,
-                                 fill=color255, outline_width=2)
-
-        # ── Composite and legend ──────────────────────────────────────────────
+        # Composite everything
         composited  = Image.alpha_composite(img, overlay)
         final_rgb   = composited.convert("RGB")
         legend_draw = ImageDraw.Draw(final_rgb)
@@ -524,9 +582,6 @@ def annotate_image(image_bytes: bytes, defects: List[Defect]) -> bytes:
 
         buf = io.BytesIO()
         final_rgb.save(buf, format="JPEG", quality=93)
-        logger.info(
-            f"Annotation complete: {len(defects)} defects drawn on {w}×{h}px image (scale={scale:.2f})"
-        )
         return buf.getvalue()
 
     except Exception as e:
