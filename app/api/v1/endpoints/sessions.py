@@ -306,16 +306,20 @@ async def list_sessions(
 # ---------------------------------------------------------------------------
 @router.get(
     "/sessions/object/{object_id}",
-    summary="Get all inspection sessions for a specific object_id",
+    summary="Get all inspection sessions for a specific object_id (triggers background AI if pending)",
 )
 async def sessions_by_object(
     object_id: str,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     q = (
         select(InspectionSession)
         .where(InspectionSession.object_id == object_id.upper())
-        .options(selectinload(InspectionSession.frames))
+        .options(
+            selectinload(InspectionSession.frames)
+            .selectinload(InspectionFrame.defects)
+        )
         .order_by(desc(InspectionSession.created_at))
     )
     result = await db.execute(q)
@@ -327,11 +331,35 @@ async def sessions_by_object(
             detail=f"No sessions found for object_id '{object_id}'",
         )
 
+    session_details = []
+    status_changed = False
+
+    for session in sessions:
+        if session.status == "pending":
+            logger.info(f"[{session.session_id}] Session is pending. Launching Background Task via object_id...")
+            session.status = "processing"
+            status_changed = True
+            background_tasks.add_task(_run_ai_pipeline_background, session.session_id)
+
+        pair_results = [_orm_frame_to_schema(f) for f in sorted(session.frames, key=lambda x: x.frame_index)]
+        summary = compute_statistics(pair_results) if pair_results and session.status == "completed" else None
+
+        session_details.append(
+            SessionDetailResponse(
+                session=_orm_session_to_summary(session),
+                per_pair_results=pair_results,
+                statistical_summary=summary,
+            )
+        )
+
+    if status_changed:
+        await db.commit()
+
     return {
         "success": True,
         "object_id": object_id.upper(),
-        "count": len(sessions),
-        "sessions": [_orm_session_to_summary(s, include_frames=True) for s in sessions],
+        "count": len(session_details),
+        "sessions": session_details,
     }
 
 
