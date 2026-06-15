@@ -577,8 +577,6 @@ def annotate_image(image_bytes: bytes, defects: List[Defect]) -> bytes:
         # Composite everything
         composited  = Image.alpha_composite(img, overlay)
         final_rgb   = composited.convert("RGB")
-        legend_draw = ImageDraw.Draw(final_rgb)
-        _draw_legend(legend_draw, w, h, small_font, defects)
 
         buf = io.BytesIO()
         final_rgb.save(buf, format="JPEG", quality=93)

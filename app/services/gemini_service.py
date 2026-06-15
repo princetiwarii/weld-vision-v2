@@ -30,21 +30,26 @@ genai.configure(api_key=settings.GEMINI_API_KEY)
 # Unified prompt — validation + analysis in one call (token-optimised)
 # ---------------------------------------------------------------------------
 WELD_INSPECTION_PROMPT = """\
-Analyze the provided welding image. Inspect the weld area for the following defects:
-- Blowhole / Porosity
-- Excess Reinforcement
-- Undercut
-- Underfill
-- Spatters
-- Any other visible weld defect
+You are an expert Certified Welding Inspector (CWI). Analyze the provided high-resolution stitched welding image.
+Perform a strict, professional inspection of the weld bead and adjacent base metal for the following primary defects:
+- Blowhole / Porosity (surface breaking pores)
+- Excess Reinforcement (unacceptably high humps or convexity)
+- Undercut (grooves melted into the base metal at the weld toe)
+- Underfill (depressions or valleys where the weld metal is below the base metal surface)
+- Spatters (expelled droplets of molten metal scattered around the weld)
+- Lack of Fusion / Incomplete Penetration
+- Cracks, Arc Strikes, or Slag Inclusions
 
-Use the measurement scale visible in the image to estimate dimensions.
-For point defects (like Blowholes and Spatters), group them into clusters if there are many and provide an estimated count.
-For linear defects (like Undercut, Underfill, Excess Reinforcement), estimate their length in mm.
+Instructions for Precision:
+1. Identify ALL defect instances. If multiple separate instances of the same defect exist, create a separate JSON object for each unless they are a dense cluster.
+2. For point defects (Spatters, Blowholes): If numerous, group them into a single bounding box tightly enclosing the cluster, and provide an accurate `estimated_count` (e.g. ">20 droplets", "5-7 visible").
+3. For linear defects (Undercut, Underfill, Excess Reinforcement): Create tight bounding boxes along the specific segment where the defect occurs. Include `position` details (e.g. "Top Toe", "Bottom Toe").
+4. Provide highly descriptive, professional `label` values exactly as a CWI would write on a report (e.g. "Extensive Undercut (Top Toe)", "Widespread Spatter (>20 droplets)", "Notable Underfill Valleys", "Isolated Blowhole").
 
 SYSTEM OVERRIDE FOR API INTEGRATION:
 To fulfill the requirements for our rendering engine, you MUST output ONLY valid JSON.
-Do NOT output markdown. Do NOT output a literal text table. Our Python backend will automatically generate the table and draw the labels directly onto the image using the `bounding_box` coordinates you provide (0.0 to 1.0 relative, where x=0 is left, y=0 is top, x=1 is right, y=1 is bottom).
+Do NOT output markdown. Do NOT output a literal text table. Our Python backend will automatically generate the table and draw the labels directly onto the image using the `bounding_box` coordinates you provide.
+CRITICAL: Bounding box coordinates must be tightly clamped to the exact visible defect boundary (0.0 to 1.0 relative, where x=0 is left, y=0 is top, x=1 is right, y=1 is bottom).
 
 Required JSON format:
 {
