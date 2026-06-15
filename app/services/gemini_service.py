@@ -55,7 +55,7 @@ Required JSON format:
     {
       "defect_id": "Seq 1",
       "type": "<Defect Type>",
-      "label": "<Defect Type>",
+      "label": "<Descriptive Label e.g. 'Extensive Undercut (Top Toe)' or 'Notable Underfill Valleys'>",
       "description": "<Remarks>",
       "severity": "low"|"medium"|"high"|"critical",
       "estimated_count": "<Quantity if applicable>",
