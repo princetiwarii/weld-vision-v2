@@ -33,28 +33,33 @@ WELD_INSPECTION_PROMPT = """\
 Act as a Certified Welding Inspector (CWI).
 
 Analyze the entire weld image for:
-Undercut, Underfill, Excess Reinforcement, Blowholes/Porosity, Spatter
+Undercut, Underfill, Excess Reinforcement, Blowholes/Porosity, Spatter.
 
-Identify all visible defects, count occurrences, generate defect statistics, and create an annotated output image with all defects marked using tight marking.
+Identify all visible defects, count occurrences, and provide tight bounding boxes for all defects so our backend can draw them.
 
 Provide highly descriptive, professional `label` values exactly as a CWI would write on a report (e.g. "Extensive Undercut (Top Toe)", "Widespread Spatter (>20 droplets)").
 
 Return:
-- Defect statistics
-- Defect locations
-- Severity (Minor/Moderate/Severe)
-- Annotated inspection image
+- Defect statistics and summary
+- Defect locations (Tight Bounding boxes)
+- Severity (low/medium/high/critical)
+- Compliance with AWS D1.1 and ISO 5817
+- Actionable recommendations
 
 SYSTEM OVERRIDE FOR API INTEGRATION:
 To fulfill the requirements for our rendering engine, you MUST output ONLY valid JSON.
 Do NOT output markdown. Do NOT output a literal text table. Our Python backend will automatically generate the table and draw the labels directly onto the image using the `bounding_box` coordinates you provide.
-CRITICAL: Bounding box coordinates must be tightly clamped to the exact visible defect boundary (0.0 to 1.0 relative, where x=0 is left, y=0 is top, x=1 is right, y=1 is bottom).
+CRITICAL: Bounding box coordinates must be precise decimals tightly clamped to the exact visible defect boundary (0.0 to 1.0 relative, where x=0 is left, y=0 is top, x=1 is right, y=1 is bottom).
 
 Required JSON format:
 {
   "valid": true,
   "overall_result": "pass"|"fail"|"review",
   "weld_quality_score": 90,
+  "defect_summary": {
+    "total_defects": 2,
+    "most_common_defect": "Spatter"
+  },
   "defects": [
     {
       "defect_id": "Seq 1",
@@ -66,7 +71,15 @@ Required JSON format:
       "length_mm": 10.5,
       "bounding_box": {"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
     }
-  ]
+  ],
+  "standards_compliance": [
+    {"standard": "AWS D1.1", "compliant": false, "notes": "<Reason>"},
+    {"standard": "ISO 5817", "compliant": false, "notes": "<Reason>"}
+  ],
+  "recommendations": [
+    "<Actionable recommendation 1>"
+  ],
+  "model_notes": "<Any additional model notes or disclaimers>"
 }
 """
 
@@ -132,7 +145,7 @@ def _salvage_truncated_json(raw: str) -> dict:
 
 class GeminiService:
     def __init__(self):
-        self.model = genai.GenerativeModel("gemini-2.5-pro")
+        self.model = genai.GenerativeModel("gemini-3.5-flash")
 
     def _call_gemini(self, prompt: str, image_bytes: bytes, mime_type: str) -> str:
         """Raw Gemini call — returns stripped text."""
