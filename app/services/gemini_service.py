@@ -57,8 +57,8 @@ Required JSON format:
   "overall_result": "pass"|"fail"|"review",
   "weld_quality_score": 90,
   "defect_summary": {
-    "total_defects": 2,
-    "most_common_defect": "Spatter"
+    "Spatter": 2,
+    "Undercut": 1
   },
   "defects": [
     {
