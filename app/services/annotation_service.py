@@ -547,33 +547,6 @@ def annotate_image(image_bytes: bytes, defects: List[Defect]) -> bytes:
                     best_anchor = arrow_target
                     best_bb_cx = bb_cx
 
-            # ─────────────────────────────────────────────────────────────────
-            # Draw ONE Label per defect group
-            # ─────────────────────────────────────────────────────────────────
-            if best_anchor:
-                tw, th = _text_size(draw, label_txt, label_font)
-                pad_x, pad_y = int(8 * scale), int(4 * scale)
-                tag_w = tw + pad_x * 2
-                tag_h = th + pad_y * 2
-                
-                prefer_above = (best_anchor[1] > h * 0.5)
-                lx, ly = placer.find_position(best_bb_cx, best_anchor[1], tag_w, tag_h, prefer_above=prefer_above)
-
-                # Pointer line to the main/largest shape
-                tag_cx = lx + tag_w // 2
-                tag_cy = ly + tag_h // 2
-                draw.line([(tag_cx, tag_cy), best_anchor], fill=color + (200,), width=max(1, int(2 * scale)))
-
-                # Tag Background
-                draw.rectangle([lx, ly, lx + tag_w, ly + tag_h], fill=color + (230,))
-                
-                # Tag Text
-                _draw_outlined_text(draw, (lx + pad_x, ly + pad_y), label_txt, font=label_font, fill=(255, 255, 255, 255), outline_width=1)
-            elif not defect_group[0].bounding_box:
-                # Fallback if no bounding box for any defect in the group
-                lx, ly = 20, 20 + i * int(34 * scale) # Note: 'i' is not available here, but we can just use 20 for simplicity
-                _draw_outlined_text(draw, (lx, ly), label_txt, font=label_font, fill=color255, outline_width=2)
-
         # Composite everything
         composited  = Image.alpha_composite(img, overlay)
         final_rgb   = composited.convert("RGB")

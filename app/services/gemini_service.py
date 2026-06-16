@@ -39,6 +39,10 @@ Identify all visible defects, count occurrences, and provide tight bounding boxe
 
 Provide highly descriptive, professional `label` values exactly as a CWI would write on a report (e.g. "Extensive Undercut (Top Toe)", "Widespread Spatter (>20 droplets)").
 
+IMPORTANT ANNOTATION INSTRUCTIONS:
+You MUST exhaustively identify and provide bounding boxes for EVERY single visible defect. 
+Do NOT write the defect name (like "undercut") directly next to the bounding box on the image. Our backend will draw the shapes. Just provide the tight bounding boxes in the JSON output, and include highly descriptive, professional `label` values inside the JSON so they can be displayed in the UI instead of on the image.
+
 Return:
 - Defect statistics and summary
 - Defect locations (Tight Bounding boxes)
@@ -154,7 +158,7 @@ class GeminiService:
         response = self.model.generate_content(
             [prompt, {"mime_type": mime_type, "data": image_bytes}],
             generation_config=genai.GenerationConfig(
-                temperature=0.1,
+                temperature=0.3,
                 max_output_tokens=8192,
                 response_mime_type="application/json",
             ),
@@ -251,6 +255,29 @@ class GeminiService:
                 elif "low" in sev_raw: sev = "low"
                 else: sev = "medium"
 
+                # Safe parse numeric and string fields
+                raw_len = d.get("length_mm")
+                try:
+                    length_mm = float(raw_len) if raw_len is not None and str(raw_len).lower() not in ["n/a", "null", "none"] else None
+                except (ValueError, TypeError):
+                    length_mm = None
+                    
+                est_count = d.get("estimated_count")
+                if est_count is not None:
+                    est_count = str(est_count)
+                
+                raw_depth = d.get("depth_mm")
+                try:
+                    depth_mm = float(raw_depth) if raw_depth is not None and str(raw_depth).lower() not in ["n/a", "null", "none"] else None
+                except (ValueError, TypeError):
+                    depth_mm = None
+                    
+                raw_width = d.get("width_mm")
+                try:
+                    width_mm = float(raw_width) if raw_width is not None and str(raw_width).lower() not in ["n/a", "null", "none"] else None
+                except (ValueError, TypeError):
+                    width_mm = None
+
                 defects.append(Defect(
                     defect_id=str(d.get("defect_id", str(uuid.uuid4())[:8])),
                     type=str(d.get("type", "Unknown")),
@@ -259,11 +286,11 @@ class GeminiService:
                     description=str(d.get("description", "")),
                     confidence=float(d.get("confidence", 0.8)),
                     bounding_box=BoundingBox(**bb) if bb else None,
-                    length_mm=d.get("length_mm"),
-                    depth_mm=d.get("depth_mm"),
-                    width_mm=d.get("width_mm"),
+                    length_mm=length_mm,
+                    depth_mm=depth_mm,
+                    width_mm=width_mm,
                     count=d.get("count"),
-                    estimated_count=d.get("estimated_count"),
+                    estimated_count=est_count,
                     position=d.get("position"),
                     standards_reference=d.get("standards_reference"),
                     recommendation=d.get("recommendation"),
