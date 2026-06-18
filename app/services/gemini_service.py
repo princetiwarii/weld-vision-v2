@@ -149,33 +149,44 @@ def _salvage_truncated_json(raw: str) -> dict:
 
 class GeminiService:
     def __init__(self):
-        self.model = genai.GenerativeModel("gemini-3.5-flash")
+        self.model = genai.GenerativeModel("gemini-1.5-flash")
 
     def _call_gemini(self, prompt: str, image_bytes: bytes, mime_type: str) -> str:
-        """Raw Gemini call — returns stripped text."""
+        """Raw Gemini call — returns stripped text with rate limit retries."""
         import time
-        start = time.time()
-        response = self.model.generate_content(
-            [prompt, {"mime_type": mime_type, "data": image_bytes}],
-            generation_config=genai.GenerationConfig(
-                temperature=0.3,
-                max_output_tokens=8192,
-                response_mime_type="application/json",
-            ),
-        )
-        elapsed = round(time.time() - start, 2)
-        raw = response.text.strip()
-        logger.warning(f"RAW GEMINI OUTPUT ({len(raw)} chars):\n{raw}")
+        from google.api_core.exceptions import ResourceExhausted
         
-        # Aggressively extract only the JSON payload in case Gemini generates 
-        # conversational text or markdown tables outside the JSON block.
-        if "{" in raw and "}" in raw:
-            start_idx = raw.find("{")
-            end_idx = raw.rfind("}") + 1
-            raw = raw[start_idx:end_idx]
-            
-        logger.info(f"Gemini responded in {elapsed}s | {len(raw)} chars")
-        return raw
+        for attempt in range(4):
+            try:
+                start = time.time()
+                response = self.model.generate_content(
+                    [prompt, {"mime_type": mime_type, "data": image_bytes}],
+                    generation_config=genai.GenerationConfig(
+                        temperature=0.3,
+                        max_output_tokens=8192,
+                        response_mime_type="application/json",
+                    ),
+                )
+                elapsed = round(time.time() - start, 2)
+                raw = response.text.strip()
+                logger.warning(f"RAW GEMINI OUTPUT ({len(raw)} chars):\n{raw}")
+                
+                # Aggressively extract only the JSON payload in case Gemini generates 
+                # conversational text or markdown tables outside the JSON block.
+                if "{" in raw and "}" in raw:
+                    start_idx = raw.find("{")
+                    end_idx = raw.rfind("}") + 1
+                    raw = raw[start_idx:end_idx]
+                    
+                logger.info(f"Gemini responded in {elapsed}s | {len(raw)} chars")
+                return raw
+            except ResourceExhausted as e:
+                if attempt == 3:
+                    logger.error(f"Gemini API rate limit exceeded after 4 attempts: {e}")
+                    raise
+                wait_time = (2 ** attempt) * 5
+                logger.warning(f"Gemini Rate Limit hit. Waiting {wait_time}s before retry...")
+                time.sleep(wait_time)
 
     def _call_gemini_unified(self, image_bytes: bytes, mime_type: str) -> dict:
         """
@@ -255,12 +266,15 @@ class GeminiService:
                 elif "low" in sev_raw: sev = "low"
                 else: sev = "medium"
 
-                # Safe parse numeric and string fields
-                raw_len = d.get("length_mm")
-                try:
-                    length_mm = float(raw_len) if raw_len is not None and str(raw_len).lower() not in ["n/a", "null", "none"] else None
-                except (ValueError, TypeError):
-                    length_mm = None
+                # Calculate exact physical length using the bounding box width and known scale
+                if length_cm > 0.0 and bb:
+                    length_mm = round(bb["width"] * length_cm * 10.0, 1)
+                else:
+                    raw_len = d.get("length_mm")
+                    try:
+                        length_mm = float(raw_len) if raw_len is not None and str(raw_len).lower() not in ["n/a", "null", "none"] else None
+                    except (ValueError, TypeError):
+                        length_mm = None
                     
                 est_count = d.get("estimated_count")
                 if est_count is not None:

@@ -339,7 +339,8 @@ async def sessions_by_object(
             session.status = "processing"
             await db.commit()
             
-            await _run_ai_pipeline_background(session.session_id)
+            sid = str(session.session_id)
+            await _run_ai_pipeline_background(sid)
             
             # Expire just THIS session to force a fresh pull of URLs from the DB
             db.expire(session)
@@ -347,7 +348,7 @@ async def sessions_by_object(
             # Re-fetch the session after background task completes
             q_refresh = (
                 select(InspectionSession)
-                .where(InspectionSession.session_id == session.session_id)
+                .where(InspectionSession.session_id == sid)
                 .options(
                     selectinload(InspectionSession.frames)
                     .selectinload(InspectionFrame.defects)
