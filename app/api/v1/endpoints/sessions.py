@@ -341,6 +341,9 @@ async def sessions_by_object(
             
             await _run_ai_pipeline_background(session.session_id)
             
+            # Expire just THIS session to force a fresh pull of URLs from the DB
+            db.expire(session)
+            
             # Re-fetch the session after background task completes
             q_refresh = (
                 select(InspectionSession)
@@ -410,6 +413,9 @@ async def get_session(
         await db.commit()
         
         await _run_ai_pipeline_background(session_id)
+        
+        # Expire just THIS session to force a fresh pull of URLs from the DB
+        db.expire(session)
         
         # Re-fetch session
         res = await db.execute(q)
