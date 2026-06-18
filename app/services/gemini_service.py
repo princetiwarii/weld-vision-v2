@@ -154,7 +154,7 @@ class GeminiService:
     def _call_gemini(self, prompt: str, image_bytes: bytes, mime_type: str) -> str:
         """Raw Gemini call — returns stripped text with rate limit retries."""
         import time
-        from google.api_core.exceptions import ResourceExhausted
+        from google.api_core.exceptions import ResourceExhausted, DeadlineExceeded, ServiceUnavailable, InternalServerError
         
         for attempt in range(4):
             try:
@@ -180,12 +180,12 @@ class GeminiService:
                     
                 logger.info(f"Gemini responded in {elapsed}s | {len(raw)} chars")
                 return raw
-            except ResourceExhausted as e:
+            except (ResourceExhausted, DeadlineExceeded, ServiceUnavailable, InternalServerError) as e:
                 if attempt == 3:
-                    logger.error(f"Gemini API rate limit exceeded after 4 attempts: {e}")
+                    logger.error(f"Gemini API error exceeded after 4 attempts: {e}")
                     raise
                 wait_time = (2 ** attempt) * 5
-                logger.warning(f"Gemini Rate Limit hit. Waiting {wait_time}s before retry...")
+                logger.warning(f"Gemini API hit {type(e).__name__}. Waiting {wait_time}s before retry...")
                 time.sleep(wait_time)
 
     def _call_gemini_unified(self, image_bytes: bytes, mime_type: str) -> dict:
