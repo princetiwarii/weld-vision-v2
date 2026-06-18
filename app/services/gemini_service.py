@@ -166,6 +166,7 @@ class GeminiService:
                         max_output_tokens=8192,
                         response_mime_type="application/json",
                     ),
+                    request_options={"timeout": 600}
                 )
                 elapsed = round(time.time() - start, 2)
                 raw = response.text.strip()
