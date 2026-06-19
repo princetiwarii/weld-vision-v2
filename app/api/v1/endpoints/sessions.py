@@ -262,8 +262,14 @@ async def _run_ai_pipeline_background(session_id: str):
             session.fail_count = summary.fail_count
             session.review_count = summary.review_count
             session.processing_time_seconds = elapsed
-            session.status = "completed"
             session.completed_at = datetime.now(timezone.utc)
+
+            # Check if session was manually overridden while AI was running
+            current_status = await db.scalar(select(InspectionSession.status).where(InspectionSession.session_id == session_id))
+            if current_status == "completed":
+                logger.warning(f"[{session_id}] AI Pipeline aborting save: session already marked completed (likely manual override).")
+                await db.rollback()
+                return
 
             await db.commit()
             logger.info(f"[{session_id}] ✓ AI Pipeline done in {elapsed}s")
