@@ -1,3 +1,4 @@
+import asyncio
 import boto3
 from botocore.exceptions import ClientError
 from fastapi import HTTPException, status
@@ -19,7 +20,7 @@ class S3Service:
     def public_url(self, key: str) -> str:
         return f"https://{self.bucket}.s3.{self.region}.amazonaws.com/{key}"
 
-    def ensure_object_folder(self, object_id: str) -> str:
+    async def ensure_object_folder(self, object_id: str) -> str:
         """
         Creates a placeholder object in S3 so the object_id folder
         is visible in the AWS Console.
@@ -29,12 +30,16 @@ class S3Service:
         """
         folder_prefix = f"inspections/{object_id.upper()}/"
         placeholder_key = f"{folder_prefix}.keep"
+        loop = asyncio.get_running_loop()
         try:
-            self.client.put_object(
-                Bucket=self.bucket,
-                Key=placeholder_key,
-                Body=b"",
-                ContentType="application/octet-stream",
+            await loop.run_in_executor(
+                None,
+                lambda: self.client.put_object(
+                    Bucket=self.bucket,
+                    Key=placeholder_key,
+                    Body=b"",
+                    ContentType="application/octet-stream",
+                )
             )
             logger.info(f"S3 folder ensured: {folder_prefix}")
         except ClientError as e:
@@ -42,20 +47,24 @@ class S3Service:
             logger.warning(f"S3 folder placeholder failed [{placeholder_key}]: {e}")
         return folder_prefix
 
-    def upload_bytes(
+    async def upload_bytes(
         self,
         data: bytes,
         key: str,
         content_type: str = "image/jpeg",
     ) -> str:
         """Upload raw bytes to S3 (public-read) and return the public URL."""
+        loop = asyncio.get_running_loop()
         try:
-            self.client.put_object(
-                Bucket=self.bucket,
-                Key=key,
-                Body=data,
-                ContentType=content_type,
-                # ACL="public-read",
+            await loop.run_in_executor(
+                None,
+                lambda: self.client.put_object(
+                    Bucket=self.bucket,
+                    Key=key,
+                    Body=data,
+                    ContentType=content_type,
+                    # ACL="public-read",
+                )
             )
             url = self.public_url(key)
             logger.info(f"S3 ✓ → {key}")
@@ -67,11 +76,14 @@ class S3Service:
                 detail=f"S3 upload failed: {str(e)}",
             )
 
-    def download_bytes(self, key: str) -> bytes:
+    async def download_bytes(self, key: str) -> bytes:
         """Download raw bytes from S3."""
+        loop = asyncio.get_running_loop()
         try:
-            response = self.client.get_object(Bucket=self.bucket, Key=key)
-            return response["Body"].read()
+            def _download():
+                response = self.client.get_object(Bucket=self.bucket, Key=key)
+                return response["Body"].read()
+            return await loop.run_in_executor(None, _download)
         except ClientError as e:
             logger.error(f"S3 download failed [{key}]: {e}")
             raise HTTPException(
@@ -79,12 +91,13 @@ class S3Service:
                 detail=f"S3 download failed: {str(e)}",
             )
 
-    def delete_prefix(self, prefix: str) -> int:
+    async def delete_prefix(self, prefix: str) -> int:
         """
         Deletes all objects in the bucket that start with the given prefix.
         Returns the number of objects deleted.
         """
-        try:
+        loop = asyncio.get_running_loop()
+        def _delete():
             paginator = self.client.get_paginator("list_objects_v2")
             pages = paginator.paginate(Bucket=self.bucket, Prefix=prefix)
 
@@ -98,7 +111,10 @@ class S3Service:
                         Delete={"Objects": objects_to_delete, "Quiet": True}
                     )
                     deleted_count += len(objects_to_delete)
-            
+            return deleted_count
+
+        try:
+            deleted_count = await loop.run_in_executor(None, _delete)
             logger.info(f"S3 ✓ Deleted {deleted_count} objects under prefix '{prefix}'")
             return deleted_count
         except ClientError as e:

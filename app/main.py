@@ -74,7 +74,8 @@ async def timing_middleware(request: Request, call_next):
 
 @app.exception_handler(404)
 async def not_found(request: Request, exc):
-    return JSONResponse(status_code=404, content={"success": False, "message": "Not found"})
+    detail = getattr(exc, "detail", "Not found")
+    return JSONResponse(status_code=404, content={"success": False, "message": detail})
 
 
 @app.exception_handler(500)

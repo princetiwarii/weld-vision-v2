@@ -32,28 +32,12 @@ genai.configure(api_key=settings.GEMINI_API_KEY)
 WELD_INSPECTION_PROMPT = """\
 Act as a Certified Welding Inspector (CWI).
 
-Analyze the entire weld image for:
-Undercut, Underfill, Excess Reinforcement, Blowholes/Porosity, Spatter.
+Look in details where the defects actually ARE. Look for all defects like blowholes, undercut, overcut, underfill, overfill, spatters, etc.
+Mark them specifically by providing tight bounding boxes for each defect very clearly and neatly so our backend can draw them directly on the annotated stitched image.
 
-Identify all visible defects, count occurrences, and provide tight bounding boxes for all defects so our backend can draw them.
-
-Provide highly descriptive, professional `label` values exactly as a CWI would write on a report (e.g. "Extensive Undercut (Top Toe)", "Widespread Spatter (>20 droplets)").
-
-IMPORTANT ANNOTATION INSTRUCTIONS:
-You MUST exhaustively identify and provide bounding boxes for EVERY single visible defect. 
-Do NOT write the defect name (like "undercut") directly next to the bounding box on the image. Our backend will draw the shapes. Just provide the tight bounding boxes in the JSON output, and include highly descriptive, professional `label` values inside the JSON so they can be displayed in the UI instead of on the image.
-
-Return:
-- Defect statistics and summary
-- Defect locations (Tight Bounding boxes)
-- Severity (low/medium/high/critical)
-- Compliance with AWS D1.1 and ISO 5817
-- Actionable recommendations
-
-SYSTEM OVERRIDE FOR API INTEGRATION:
-To fulfill the requirements for our rendering engine, you MUST output ONLY valid JSON.
-Do NOT output markdown. Do NOT output a literal text table. Our Python backend will automatically generate the table and draw the labels directly onto the image using the `bounding_box` coordinates you provide.
 CRITICAL: Bounding box coordinates must be precise decimals tightly clamped to the exact visible defect boundary (0.0 to 1.0 relative, where x=0 is left, y=0 is top, x=1 is right, y=1 is bottom).
+
+Return the result EXACTLY in the JSON format as returning previously.
 
 Required JSON format:
 {
@@ -68,7 +52,7 @@ Required JSON format:
     {
       "defect_id": "Seq 1",
       "type": "<Defect Type>",
-      "label": "<Descriptive Label e.g. 'Extensive Undercut (Top Toe)' or 'Notable Underfill Valleys'>",
+      "label": "<Descriptive Label e.g. 'Undercut' or 'Spatter'>",
       "description": "<Remarks>",
       "severity": "low"|"medium"|"high"|"critical",
       "estimated_count": "<Quantity if applicable>",
@@ -149,20 +133,21 @@ def _salvage_truncated_json(raw: str) -> dict:
 
 class GeminiService:
     def __init__(self):
-        self.model = genai.GenerativeModel("gemini-3.5-flash")
+        self.model = genai.GenerativeModel("gemini-2.5-flash")
 
-    def _call_gemini(self, prompt: str, image_bytes: bytes, mime_type: str) -> str:
+    async def _call_gemini(self, prompt: str, image_bytes: bytes, mime_type: str) -> str:
         """Raw Gemini call — returns stripped text with rate limit retries."""
+        import asyncio
         import time
         from google.api_core.exceptions import ResourceExhausted, DeadlineExceeded, ServiceUnavailable, InternalServerError
         
         for attempt in range(4):
             try:
                 start = time.time()
-                response = self.model.generate_content(
+                response = await self.model.generate_content_async(
                     [prompt, {"mime_type": mime_type, "data": image_bytes}],
                     generation_config=genai.GenerationConfig(
-                        temperature=0.3,
+                        temperature=0.6,
                         max_output_tokens=8192,
                         response_mime_type="application/json",
                     ),
@@ -187,16 +172,16 @@ class GeminiService:
                     raise
                 wait_time = (2 ** attempt) * 5
                 logger.warning(f"Gemini API hit {type(e).__name__}. Waiting {wait_time}s before retry...")
-                time.sleep(wait_time)
+                await asyncio.sleep(wait_time)
 
-    def _call_gemini_unified(self, image_bytes: bytes, mime_type: str) -> dict:
+    async def _call_gemini_unified(self, image_bytes: bytes, mime_type: str) -> dict:
         """
         Single Gemini call that handles both weld validation and full analysis.
         Returns the parsed dict. Raises HTTPException(422) for non-weld images
         and HTTPException(503) for API/parse failures.
         """
         try:
-            raw = self._call_gemini(WELD_INSPECTION_PROMPT, image_bytes, mime_type)
+            raw = await self._call_gemini(WELD_INSPECTION_PROMPT, image_bytes, mime_type)
             data = _salvage_truncated_json(raw)
 
             # Gate check: model flagged image as non-weld
@@ -223,7 +208,7 @@ class GeminiService:
         """Deprecated shim — validation now happens inside _call_gemini_unified."""
         return True, "Validation merged into unified prompt"
 
-    def analyze_pair(
+    async def analyze_pair(
         self,
         stitched_bytes: bytes,
         frame_index: int,
@@ -241,7 +226,7 @@ class GeminiService:
         mime_type: str = "image/jpeg",
     ) -> FramePairResult:
         """Analyze a stitched frame pair and return a FramePairResult."""
-        raw = self._call_gemini_unified(stitched_bytes, mime_type)
+        raw = await self._call_gemini_unified(stitched_bytes, mime_type)
 
         defects = []
         for d in raw.get("defects", []):

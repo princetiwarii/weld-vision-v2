@@ -128,7 +128,7 @@ class VideoInspectionResponse(BaseModel):
 
     # Video info
     video_filename:          str
-    video_url:               str
+    video_url:               Optional[str] = None
     video_duration_seconds:  Optional[float] = None
     frames_extracted:        int             # raw frames pulled from video
     frame_pairs_analyzed:    int             # stitched pairs sent to Gemini
@@ -173,7 +173,7 @@ class SessionSummary(BaseModel):
     scan_number:             Optional[str]
     side:                    Optional[str]
     video_filename:          str
-    video_url:               str
+    video_url:               Optional[str] = None
     frames_extracted:        int
     avg_quality_score:       Optional[float]
     total_defects_found:     int

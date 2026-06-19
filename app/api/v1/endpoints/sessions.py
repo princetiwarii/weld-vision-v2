@@ -6,11 +6,14 @@ GET /api/v1/inspections/sessions/object/{object_id} — all scans for one object
 import time
 from datetime import datetime, timezone
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
+import json
+import asyncio
+from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from sqlalchemy.orm import selectinload
 from loguru import logger
+from pydantic import BaseModel
 
 from app.db.database import get_db, AsyncSessionLocal
 from app.db.models import InspectionSession, InspectionFrame, FrameDefect
@@ -156,7 +159,7 @@ async def _run_ai_pipeline_background(session_id: str):
                     continue
                 
                 stitch_key = frame.stitched_image_url.split(".amazonaws.com/")[1]
-                stitched_bytes = s3_service.download_bytes(stitch_key)
+                stitched_bytes = await s3_service.download_bytes(stitch_key)
                 logger.info(f"[{session_id}] Downloaded {frame.image_label} for analysis")
 
                 start_cm = frame.frame_index * seg_len * 2
@@ -166,7 +169,7 @@ async def _run_ai_pipeline_background(session_id: str):
                 pair_cm_ranges.append((start_cm, end_cm) if seg_len > 0 else None)
 
                 # Run Gemini
-                pair_result: FramePairResult = gemini_service.analyze_pair(
+                pair_result: FramePairResult = await gemini_service.analyze_pair(
                     stitched_bytes=stitched_bytes,
                     frame_index=frame.frame_index,
                     image_label=frame.image_label,
@@ -183,9 +186,10 @@ async def _run_ai_pipeline_background(session_id: str):
                 )
 
                 # Annotate & Upload
-                annotated_bytes = annotate_image(stitched_bytes, pair_result.defects)
+                loop = asyncio.get_running_loop()
+                annotated_bytes = await loop.run_in_executor(None, annotate_image, stitched_bytes, pair_result.defects)
                 ann_key = f"inspections/{session.object_id}/{session_id}/frames/annotated/{frame.image_label}_annotated.jpg"
-                annotated_url = s3_service.upload_bytes(annotated_bytes, ann_key, "image/jpeg")
+                annotated_url = await s3_service.upload_bytes(annotated_bytes, ann_key, "image/jpeg")
                 pair_result.annotated_image_url = annotated_url
 
                 pair_results.append(pair_result)
@@ -236,12 +240,16 @@ async def _run_ai_pipeline_background(session_id: str):
                 + (f" | {seg_len * total_images:.0f} cm total" if seg_len > 0 else "")
             )
             
-            chart_bytes = build_compile_chart(
-                annotated_bytes_list, pair_results, summary, chart_title,
-                pair_cm_ranges=pair_cm_ranges,
+            loop = asyncio.get_running_loop()
+            chart_bytes = await loop.run_in_executor(
+                None, 
+                lambda: build_compile_chart(
+                    annotated_bytes_list, pair_results, summary, chart_title,
+                    pair_cm_ranges=pair_cm_ranges,
+                )
             )
             chart_key = f"inspections/{session.object_id}/{session_id}/chart/compile_chart.jpg"
-            chart_url = s3_service.upload_bytes(chart_bytes, chart_key, "image/jpeg")
+            chart_url = await s3_service.upload_bytes(chart_bytes, chart_key, "image/jpeg")
 
             # Update Session
             elapsed = round(time.time() - t_start, 2)
@@ -310,7 +318,6 @@ async def list_sessions(
 )
 async def sessions_by_object(
     object_id: str,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     q = (
@@ -335,13 +342,30 @@ async def sessions_by_object(
     status_changed = False
 
     for session in sessions:
-        if session.status in ("pending", "processing", "failed"):
-            logger.info(f"[{session.session_id}] Session is {session.status}. Running AI Pipeline in BACKGROUND...")
+        if session.status == "pending":
+            logger.info(f"[{session.session_id}] Session is pending. Running AI Pipeline synchronously...")
             session.status = "processing"
             await db.commit()
             
             sid = str(session.session_id)
-            background_tasks.add_task(_run_ai_pipeline_background, sid)
+            await _run_ai_pipeline_background(sid)
+            
+            # Expire just THIS session to force a fresh pull of URLs from the DB
+            db.expire(session)
+            
+            # Re-fetch the session after background task completes
+            q_refresh = (
+                select(InspectionSession)
+                .where(InspectionSession.session_id == sid)
+                .options(
+                    selectinload(InspectionSession.frames)
+                    .selectinload(InspectionFrame.defects)
+                )
+            )
+            res = await db.execute(q_refresh)
+            session = res.scalar_one_or_none()
+            if not session:
+                continue
 
         pair_results = [_orm_frame_to_schema(f) for f in sorted(session.frames, key=lambda x: x.frame_index)]
         summary = compute_statistics(pair_results) if pair_results and session.status == "completed" else None
@@ -373,7 +397,6 @@ async def sessions_by_object(
 )
 async def get_session(
     session_id: str,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     q = (
@@ -393,12 +416,21 @@ async def get_session(
             detail=f"Session '{session_id}' not found.",
         )
 
-    if session.status in ("pending", "processing", "failed"):
-        logger.info(f"[{session_id}] Session is {session.status}. Running AI Pipeline in BACKGROUND...")
+    if session.status == "pending":
+        logger.info(f"[{session_id}] Session is pending. Running AI Pipeline synchronously...")
         session.status = "processing"
         await db.commit()
         
-        background_tasks.add_task(_run_ai_pipeline_background, session_id)
+        await _run_ai_pipeline_background(session_id)
+        
+        # Expire just THIS session to force a fresh pull of URLs from the DB
+        db.expire(session)
+        
+        # Re-fetch session
+        res = await db.execute(q)
+        session = res.scalar_one_or_none()
+        if not session:
+            raise HTTPException(status_code=404, detail="Session lost during processing.")
 
     pair_results = [_orm_frame_to_schema(f) for f in sorted(session.frames, key=lambda x: x.frame_index)]
     summary      = compute_statistics(pair_results) if pair_results and session.status == "completed" else None
@@ -409,3 +441,159 @@ async def get_session(
         per_pair_results=pair_results,
         statistical_summary=summary,
     )
+
+
+class ManualAnnotationUpdate(BaseModel):
+    annotated_image_url: str
+    gemini_json_output: Optional[dict] = None
+
+# ---------------------------------------------------------------------------
+# Unified Endpoint to Override Images
+# ---------------------------------------------------------------------------
+@router.put(
+    "/sessions/object/{object_id}/override-images",
+    summary="Replace all annotated images and compiled chart for an object",
+)
+async def override_images(
+    object_id: str,
+    compiled_chart: UploadFile = File(...),
+    annotated_images: List[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Overwrites the S3 images and DB URLs for an existing session's frames and chart.
+    """
+    q = (
+        select(InspectionSession)
+        .where(InspectionSession.object_id == object_id.upper())
+        .options(selectinload(InspectionSession.frames))
+        .order_by(desc(InspectionSession.created_at))
+        .limit(1)
+    )
+    result = await db.execute(q)
+    session = result.scalar_one_or_none()
+
+    import uuid
+
+    # Ensure annotated_images is a list even if only one file is uploaded
+    if not isinstance(annotated_images, list):
+        annotated_images = [annotated_images]
+
+    if not session:
+        # Create a new session on the fly
+        session_id = str(uuid.uuid4())
+        session = InspectionSession(
+            session_id=session_id,
+            object_id=object_id.upper(),
+            scan_number="Manual",
+            video_filename="Manual Override",
+            status="completed",
+        )
+        db.add(session)
+        await db.flush()
+        
+        frames = []
+        # Create a frame for each annotated image provided
+        for i in range(len(annotated_images)):
+            frame = InspectionFrame(
+                session_id=session.session_id,
+                frame_index=i,
+                image_label=f"{object_id.upper()}{i+1}_manual",
+                annotated_image_url="",
+            )
+            db.add(frame)
+            frames.append(frame)
+        await db.flush()
+    else:
+        frames = sorted(session.frames, key=lambda x: x.frame_index)
+        
+    # 1. Update Compiled Chart
+    chart_bytes = await compiled_chart.read()
+    chart_key = f"inspections/{session.object_id}/{session.session_id}/chart/compile_chart_manual.jpg"
+    chart_url = await s3_service.upload_bytes(chart_bytes, chart_key, compiled_chart.content_type)
+    session.compile_chart_url = chart_url
+    session.status = "completed"
+
+    # 2. Update Annotated Images
+    sorted_images = sorted(annotated_images, key=lambda f: f.filename)
+
+    for i, frame in enumerate(frames):
+        if i < len(sorted_images):
+            img_file = sorted_images[i]
+            img_bytes = await img_file.read()
+            key = f"inspections/{session.object_id}/{session.session_id}/frames/annotated/{frame.image_label}_manual.jpg"
+            url = await s3_service.upload_bytes(img_bytes, key, img_file.content_type)
+            frame.annotated_image_url = url
+        else:
+            # Delete extra frames if fewer images are uploaded
+            await db.delete(frame)
+
+    await db.commit()
+
+    return {
+        "success": True,
+        "session_id": session.session_id,
+        "compile_chart_url": session.compile_chart_url,
+        "frames_updated": min(len(frames), len(sorted_images))
+    }
+
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# Get session by object_id (MANUAL results - does NOT trigger AI)
+# ---------------------------------------------------------------------------
+@router.get(
+    "/sessions/object/{object_id}/manual-results",
+    summary="Get all inspection sessions for a specific object_id (strictly returns DB data without triggering AI)",
+)
+async def get_manual_sessions_by_object(
+    object_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    q = (
+        select(InspectionSession)
+        .where(InspectionSession.object_id == object_id.upper())
+        .options(
+            selectinload(InspectionSession.frames)
+            .selectinload(InspectionFrame.defects)
+        )
+        .order_by(desc(InspectionSession.created_at))
+    )
+    result = await db.execute(q)
+    sessions = result.scalars().all()
+
+    if not sessions:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No sessions found for object_id '{object_id}'",
+        )
+
+    session_details = []
+
+    for session in sessions:
+        frames = sorted(session.frames, key=lambda x: x.frame_index)
+        
+        # Auto-finalize removed. Session will be finalized when the compiled chart is manually uploaded via PUT.
+
+        pair_results = [_orm_frame_to_schema(f) for f in frames]
+        summary = compute_statistics(pair_results) if pair_results and session.status == "completed" else None
+
+        session_details.append(
+            SessionDetailResponse(
+                session=_orm_session_to_summary(session),
+                compile_chart_url=session.compile_chart_url,
+                per_pair_results=pair_results,
+                statistical_summary=summary,
+            )
+        )
+
+    return {
+        "success": True,
+        "object_id": object_id.upper(),
+        "count": len(session_details),
+        "sessions": session_details,
+    }
+
