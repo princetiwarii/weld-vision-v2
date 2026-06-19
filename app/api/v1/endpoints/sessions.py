@@ -521,17 +521,35 @@ async def override_images(
     session.status = "completed"
 
     # 2. Update Annotated Images
-    sorted_images = sorted(annotated_images, key=lambda f: f.filename)
+    # Map uploaded images by their base filename (e.g. "18GG1.jpg" -> "18GG1")
+    uploaded_files_map = {}
+    for f in annotated_images:
+        if f.filename:
+            # Strip extension to get base name and uppercase it for robust matching
+            base_name = f.filename.rsplit('.', 1)[0].upper()
+            uploaded_files_map[base_name] = f
+            # Also map the full filename just in case
+            uploaded_files_map[f.filename.upper()] = f
 
-    for i, frame in enumerate(frames):
-        if i < len(sorted_images):
-            img_file = sorted_images[i]
-            img_bytes = await img_file.read()
+    frames_updated = 0
+    for frame in frames:
+        label_upper = frame.image_label.upper()
+        
+        # Look for a match
+        matched_file = None
+        for key, file_obj in uploaded_files_map.items():
+            if label_upper == key or label_upper in key:
+                matched_file = file_obj
+                break
+        
+        if matched_file:
+            img_bytes = await matched_file.read()
             key = f"inspections/{session.object_id}/{session.session_id}/frames/annotated/{frame.image_label}_manual.jpg"
-            url = await s3_service.upload_bytes(img_bytes, key, img_file.content_type)
+            url = await s3_service.upload_bytes(img_bytes, key, matched_file.content_type)
             frame.annotated_image_url = url
+            frames_updated += 1
         else:
-            # Delete extra frames if fewer images are uploaded
+            # Delete frames that do not have a corresponding uploaded image
             await db.delete(frame)
 
     await db.commit()
@@ -540,7 +558,7 @@ async def override_images(
         "success": True,
         "session_id": session.session_id,
         "compile_chart_url": session.compile_chart_url,
-        "frames_updated": min(len(frames), len(sorted_images))
+        "frames_updated": frames_updated
     }
 
 
