@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 import json
 import asyncio
+import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
@@ -123,168 +124,6 @@ def _orm_session_to_summary(s: InspectionSession, include_frames: bool = False) 
     )
 
 
-async def _run_ai_pipeline_background(session_id: str):
-    """
-    Background worker that fetches stitched images, runs Gemini, annotates, and compiles charts.
-    """
-    logger.info(f"[{session_id}] Background AI Pipeline starting...")
-    t_start = time.time()
-
-    async with AsyncSessionLocal() as db:
-        try:
-            # Re-fetch session within the background db context
-            q = (
-                select(InspectionSession)
-                .where(InspectionSession.session_id == session_id)
-                .options(
-                    selectinload(InspectionSession.frames)
-                    .selectinload(InspectionFrame.defects)
-                )
-            )
-            result = await db.execute(q)
-            session = result.scalar_one_or_none()
-            if not session:
-                logger.error(f"[{session_id}] Background task aborted: Session not found")
-                return
-
-            frames = sorted(session.frames, key=lambda x: x.frame_index)
-            pair_results = []
-            annotated_bytes_list = []
-            pair_cm_ranges = []
-            seg_len = 20.0
-
-            for frame in frames:
-                if ".amazonaws.com/" not in frame.stitched_image_url:
-                    logger.warning(f"[{session_id}] Invalid stitched URL: {frame.stitched_image_url}")
-                    continue
-                
-                stitch_key = frame.stitched_image_url.split(".amazonaws.com/")[1]
-                stitched_bytes = await s3_service.download_bytes(stitch_key)
-                logger.info(f"[{session_id}] Downloaded {frame.image_label} for analysis")
-
-                start_cm = frame.frame_index * seg_len * 2
-                len_a = seg_len
-                len_b = seg_len if frame.source_frame_b_label else 0.0
-                end_cm = start_cm + len_a + len_b
-                pair_cm_ranges.append((start_cm, end_cm) if seg_len > 0 else None)
-
-                # Run Gemini
-                pair_result: FramePairResult = await gemini_service.analyze_pair(
-                    stitched_bytes=stitched_bytes,
-                    frame_index=frame.frame_index,
-                    image_label=frame.image_label,
-                    source_frame_a_label=frame.source_frame_a_label,
-                    source_frame_b_label=frame.source_frame_b_label,
-                    timestamp_a=frame.timestamp_a_seconds,
-                    timestamp_b=frame.timestamp_b_seconds,
-                    raw_frame_a_url=frame.raw_frame_a_url,
-                    raw_frame_b_url=frame.raw_frame_b_url,
-                    stitched_image_url=frame.stitched_image_url,
-                    annotated_image_url="",
-                    start_cm=start_cm,
-                    length_cm=len_a + len_b,
-                )
-
-                # Annotate & Upload
-                loop = asyncio.get_running_loop()
-                annotated_bytes = await loop.run_in_executor(None, annotate_image, stitched_bytes, pair_result.defects)
-                ann_key = f"inspections/{session.object_id}/{session_id}/frames/annotated/{frame.image_label}_annotated.jpg"
-                annotated_url = await s3_service.upload_bytes(annotated_bytes, ann_key, "image/jpeg")
-                pair_result.annotated_image_url = annotated_url
-
-                pair_results.append(pair_result)
-                annotated_bytes_list.append(annotated_bytes)
-
-                # Update Frame in DB
-                frame.annotated_image_url = annotated_url
-                frame.overall_result = pair_result.overall_result.value
-                frame.weld_quality_score = pair_result.weld_quality_score
-                frame.defect_count = len(pair_result.defects)
-                frame.defect_summary = pair_result.defect_summary
-                frame.standards_compliance = [s.model_dump() for s in pair_result.standards_compliance]
-                frame.recommendations = pair_result.recommendations
-                frame.model_notes = pair_result.model_notes
-
-                for d in pair_result.defects:
-                    bb = d.bounding_box
-                    db.add(FrameDefect(
-                        frame_id=frame.id,
-                        session_id=session_id,
-                        defect_id=d.defect_id,
-                        defect_type=d.type,
-                        severity=d.severity.value,
-                        description=d.description,
-                        confidence=d.confidence,
-                        bb_x=bb.x if bb else None,
-                        bb_y=bb.y if bb else None,
-                        bb_width=bb.width if bb else None,
-                        bb_height=bb.height if bb else None,
-                        length_mm=d.length_mm,
-                        depth_mm=d.depth_mm,
-                        width_mm=d.width_mm,
-                        position=d.position,
-                        standards_reference=d.standards_reference,
-                        recommendation=d.recommendation,
-                    ))
-
-            # Compile Chart
-            summary = compute_statistics(pair_results)
-            total_images = session.frames_extracted
-            num_pairs = len(frames)
-            
-            chart_title = (
-                f"WeldVision — {session.object_name or session.object_id} "
-                f"| Scan {session.scan_number or 'N/A'} "
-                f"| Side: {session.side or 'N/A'} "
-                f"| {total_images} frames → {num_pairs} pairs"
-                + (f" | {seg_len * total_images:.0f} cm total" if seg_len > 0 else "")
-            )
-            
-            loop = asyncio.get_running_loop()
-            chart_bytes = await loop.run_in_executor(
-                None, 
-                lambda: build_compile_chart(
-                    annotated_bytes_list, pair_results, summary, chart_title,
-                    pair_cm_ranges=pair_cm_ranges,
-                )
-            )
-            chart_key = f"inspections/{session.object_id}/{session_id}/chart/compile_chart.jpg"
-            chart_url = await s3_service.upload_bytes(chart_bytes, chart_key, "image/jpeg")
-
-            # Update Session
-            elapsed = round(time.time() - t_start, 2)
-            session.compile_chart_url = chart_url
-            session.avg_quality_score = summary.avg_quality_score
-            session.total_defects_found = summary.total_defects_found
-            session.overall_compliance_aws = summary.overall_compliance_aws
-            session.overall_compliance_iso = summary.overall_compliance_iso
-            session.pass_count = summary.pass_count
-            session.fail_count = summary.fail_count
-            session.review_count = summary.review_count
-            session.processing_time_seconds = elapsed
-            session.completed_at = datetime.now(timezone.utc)
-
-            # Check if session was manually overridden while AI was running
-            current_status = await db.scalar(select(InspectionSession.status).where(InspectionSession.session_id == session_id))
-            if current_status == "completed":
-                logger.warning(f"[{session_id}] AI Pipeline aborting save: session already marked completed (likely manual override).")
-                await db.rollback()
-                return
-
-            await db.commit()
-            logger.info(f"[{session_id}] ✓ AI Pipeline done in {elapsed}s")
-
-        except Exception as exc:
-            await db.rollback()
-            logger.exception(f"[{session_id}] AI Pipeline failed during GET: {exc}")
-            
-            # Optionally mark session as failed
-            q = select(InspectionSession).where(InspectionSession.session_id == session_id)
-            res = await db.execute(q)
-            failed_session = res.scalar_one_or_none()
-            if failed_session:
-                failed_session.status = "failed"
-                await db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -315,138 +154,6 @@ async def list_sessions(
     }
 
 
-# ---------------------------------------------------------------------------
-# Get session by object_id (all scans for one weld object)
-# ---------------------------------------------------------------------------
-@router.get(
-    "/sessions/object/{object_id}",
-    summary="Get all inspection sessions for a specific object_id (triggers background AI if pending)",
-)
-async def sessions_by_object(
-    object_id: str,
-    db: AsyncSession = Depends(get_db),
-):
-    q = (
-        select(InspectionSession)
-        .where(InspectionSession.object_id == object_id.upper())
-        .options(
-            selectinload(InspectionSession.frames)
-            .selectinload(InspectionFrame.defects)
-        )
-        .order_by(desc(InspectionSession.created_at))
-    )
-    result = await db.execute(q)
-    sessions = result.scalars().all()
-
-    if not sessions:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No sessions found for object_id '{object_id}'",
-        )
-
-    session_details = []
-    status_changed = False
-
-    for session in sessions:
-        if session.status == "pending":
-            logger.info(f"[{session.session_id}] Session is pending. Running AI Pipeline synchronously...")
-            session.status = "processing"
-            await db.commit()
-            
-            sid = str(session.session_id)
-            await _run_ai_pipeline_background(sid)
-            
-            # Expire just THIS session to force a fresh pull of URLs from the DB
-            db.expire(session)
-            
-            # Re-fetch the session after background task completes
-            q_refresh = (
-                select(InspectionSession)
-                .where(InspectionSession.session_id == sid)
-                .options(
-                    selectinload(InspectionSession.frames)
-                    .selectinload(InspectionFrame.defects)
-                )
-            )
-            res = await db.execute(q_refresh)
-            session = res.scalar_one_or_none()
-            if not session:
-                continue
-
-        pair_results = [_orm_frame_to_schema(f) for f in sorted(session.frames, key=lambda x: x.frame_index)]
-        summary = compute_statistics(pair_results) if pair_results and session.status == "completed" else None
-
-        session_details.append(
-            SessionDetailResponse(
-                session=_orm_session_to_summary(session),
-                compile_chart_url=session.compile_chart_url,
-                per_pair_results=pair_results,
-                statistical_summary=summary,
-            )
-        )
-
-    return {
-        "success": True,
-        "object_id": object_id.upper(),
-        "count": len(session_details),
-        "sessions": session_details,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Get full session detail (Runs AI if pending)
-# ---------------------------------------------------------------------------
-@router.get(
-    "/sessions/{session_id}",
-    response_model=SessionDetailResponse,
-    summary="Get full detail of one inspection session (triggers background AI if pending)",
-)
-async def get_session(
-    session_id: str,
-    db: AsyncSession = Depends(get_db),
-):
-    q = (
-        select(InspectionSession)
-        .where(InspectionSession.session_id == session_id)
-        .options(
-            selectinload(InspectionSession.frames)
-            .selectinload(InspectionFrame.defects)
-        )
-    )
-    result  = await db.execute(q)
-    session = result.scalar_one_or_none()
-
-    if not session:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Session '{session_id}' not found.",
-        )
-
-    if session.status == "pending":
-        logger.info(f"[{session_id}] Session is pending. Running AI Pipeline synchronously...")
-        session.status = "processing"
-        await db.commit()
-        
-        await _run_ai_pipeline_background(session_id)
-        
-        # Expire just THIS session to force a fresh pull of URLs from the DB
-        db.expire(session)
-        
-        # Re-fetch session
-        res = await db.execute(q)
-        session = res.scalar_one_or_none()
-        if not session:
-            raise HTTPException(status_code=404, detail="Session lost during processing.")
-
-    pair_results = [_orm_frame_to_schema(f) for f in sorted(session.frames, key=lambda x: x.frame_index)]
-    summary      = compute_statistics(pair_results) if pair_results and session.status == "completed" else None
-
-    return SessionDetailResponse(
-        session=_orm_session_to_summary(session),
-        compile_chart_url=session.compile_chart_url,
-        per_pair_results=pair_results,
-        statistical_summary=summary,
-    )
 
 
 class ManualAnnotationUpdate(BaseModel):
@@ -621,3 +328,257 @@ async def get_manual_sessions_by_object(
         "sessions": session_details,
     }
 
+
+# ---------------------------------------------------------------------------
+# API 1: Inspect and Calculate Measurements
+# ---------------------------------------------------------------------------
+@router.get(
+    "/sessions/object/{object_id}/inspect",
+    summary="Inspects all frames of an object, reading the scale and calculating measurements via Gemini 2.5 Flash",
+)
+async def inspect_object(
+    object_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    q = (
+        select(InspectionSession)
+        .where(InspectionSession.object_id == object_id.upper())
+        .options(
+            selectinload(InspectionSession.frames)
+            .selectinload(InspectionFrame.defects)
+        )
+        .order_by(desc(InspectionSession.created_at))
+    )
+    result = await db.execute(q)
+    sessions = result.scalars().all()
+
+    if not sessions:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No sessions found for object_id '{object_id}'",
+        )
+
+    updated_sessions = []
+
+    for session in sessions:
+        session.status = "processing"
+        await db.commit()
+        
+        frames = sorted(session.frames, key=lambda x: x.frame_index)
+        pair_results = []
+        raw_gemini_outputs = []
+        
+        for frame in frames:
+            if not frame.stitched_image_url or ".amazonaws.com/" not in frame.stitched_image_url:
+                continue
+                
+            stitch_key = frame.stitched_image_url.split(".amazonaws.com/")[1]
+            try:
+                stitched_bytes = await s3_service.download_bytes(stitch_key)
+            except Exception as e:
+                logger.error(f"Download failed: {e}")
+                continue
+
+            # API 1 specific: Call the new inspect_with_measurements
+            raw_result = await gemini_service.inspect_with_measurements(
+                image_bytes=stitched_bytes,
+                model_name="gemini-2.5-flash"
+            )
+
+            # Map the raw JSON back into DB models
+            frame.overall_result = raw_result.get("overall_result", "review")
+            frame.weld_quality_score = float(raw_result.get("weld_quality_score", 0.0))
+            frame.defect_summary = raw_result.get("defect_summary", {})
+            frame.standards_compliance = raw_result.get("standards_compliance", [])
+            frame.recommendations = raw_result.get("recommendations", [])
+            frame.model_notes = raw_result.get("model_notes", "")
+            
+            # Clear old defects
+            for d in frame.defects:
+                await db.delete(d)
+            
+            defects_parsed = []
+            for d in raw_result.get("defects", []):
+                bb = d.get("bounding_box", {})
+                new_defect = FrameDefect(
+                    frame_id=frame.id,
+                    session_id=session.session_id,
+                    defect_id=d.get("defect_id", str(uuid.uuid4())[:8]),
+                    defect_type=d.get("type", "Unknown"),
+                    severity=d.get("severity", "medium"),
+                    description=d.get("description", ""),
+                    confidence=d.get("confidence", 1.0),
+                    bb_x=bb.get("x") if bb else None,
+                    bb_y=bb.get("y") if bb else None,
+                    bb_width=bb.get("width") if bb else None,
+                    bb_height=bb.get("height") if bb else None,
+                    length_mm=d.get("length_mm"),
+                    depth_mm=d.get("depth_mm"),
+                    width_mm=d.get("width_mm"),
+                    position=d.get("location_description")
+                )
+                db.add(new_defect)
+                defects_parsed.append(new_defect)
+
+            # Update frame relationship so it can be passed to schema
+            frame.defects = defects_parsed
+            
+            pair_results.append(_orm_frame_to_schema(frame))
+            raw_gemini_outputs.append(raw_result)
+
+        # Recompute stats
+        if pair_results:
+            summary = compute_statistics(pair_results)
+            session.avg_quality_score = summary.avg_quality_score
+            session.total_defects_found = summary.total_defects_found
+            session.overall_compliance_aws = summary.overall_compliance_aws
+            session.overall_compliance_iso = summary.overall_compliance_iso
+            session.pass_count = summary.pass_count
+            session.fail_count = summary.fail_count
+            session.review_count = summary.review_count
+            
+        session.status = "completed"
+        session.completed_at = datetime.now(timezone.utc)
+        await db.commit()
+        
+        frames_out = []
+        for frame, ro in zip(frames, raw_gemini_outputs):
+            frames_out.append({
+                "image_label": frame.image_label,
+                "text_output": ro
+            })
+
+        summary_dict = {}
+        if pair_results:
+            summary_dict = compute_statistics(pair_results).model_dump()
+        
+        updated_sessions.append({
+            "session_id": session.session_id,
+            "status": session.status,
+            "images_analyzed": len(frames_out),
+            "defects_per_image": frames_out,
+            "overall_summary": summary_dict
+        })
+
+    return {
+        "success": True,
+        "object_id": object_id.upper(),
+        "sessions": updated_sessions
+    }
+
+# ---------------------------------------------------------------------------
+# API 2: Generate Annotated Images (Python Drawing)
+# ---------------------------------------------------------------------------
+@router.get(
+    "/sessions/object/{object_id}/generate-images",
+    summary="Generates annotated images using Python to accurately draw defects from JSON",
+)
+async def generate_images_for_object(
+    object_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    q = (
+        select(InspectionSession)
+        .where(InspectionSession.object_id == object_id.upper())
+        .where(InspectionSession.status == "completed")
+        .options(
+            selectinload(InspectionSession.frames)
+            .selectinload(InspectionFrame.defects)
+        )
+        .order_by(desc(InspectionSession.created_at))
+    )
+    result = await db.execute(q)
+    sessions = result.scalars().all()
+
+    if not sessions:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No completed sessions found for object_id '{object_id}'. Call /inspect first.",
+        )
+
+    updated_sessions = []
+    for session in sessions:
+        frames = sorted(session.frames, key=lambda x: x.frame_index)
+        
+        annotated_bytes_list = []
+        pair_results = []
+        pair_cm_ranges = []
+        seg_len = 20.0
+        images_generated = 0
+
+        for frame in frames:
+            start_cm = frame.frame_index * seg_len * 2
+            len_a = seg_len
+            len_b = seg_len if frame.source_frame_b_label else 0.0
+            end_cm = start_cm + len_a + len_b
+            pair_cm_ranges.append((start_cm, end_cm) if seg_len > 0 else None)
+
+            if not frame.stitched_image_url or ".amazonaws.com/" not in frame.stitched_image_url:
+                logger.warning(f"[{session.session_id}] Missing stitched URL for frame {frame.frame_index}")
+                annotated_bytes_list.append(None)
+                continue
+            
+            stitch_key = frame.stitched_image_url.split(".amazonaws.com/")[1]
+            try:
+                stitched_bytes = await s3_service.download_bytes(stitch_key)
+            except Exception as e:
+                logger.warning(f"[{session.session_id}] Failed to download stitched URL for frame {frame.frame_index}: {e}")
+                annotated_bytes_list.append(None)
+                continue
+
+            # Load defects from DB and convert to schema
+            pair_result: FramePairResult = _orm_frame_to_schema(frame)
+            
+            # API 2 specific: We DO NOT call Gemini again. We trust the JSON coordinates
+            # and draw using Python for 100% precision.
+            loop = asyncio.get_running_loop()
+            annotated_bytes = await loop.run_in_executor(None, annotate_image, stitched_bytes, pair_result.defects)
+            ann_key = f"inspections/{session.object_id}/{session.session_id}/frames/annotated/{frame.image_label}_annotated.jpg"
+            annotated_url = await s3_service.upload_bytes(annotated_bytes, ann_key, "image/jpeg")
+            
+            frame.annotated_image_url = annotated_url
+            pair_result.annotated_image_url = annotated_url
+
+            pair_results.append(pair_result)
+            annotated_bytes_list.append(annotated_bytes)
+            images_generated += 1
+
+        if images_generated > 0:
+            summary = compute_statistics(pair_results)
+            total_images = session.frames_extracted
+            num_pairs = len(frames)
+            
+            chart_title = (
+                f"WeldVision — {session.object_name or session.object_id} "
+                f"| Scan {session.scan_number or 'N/A'} "
+                f"| Side: {session.side or 'N/A'} "
+                f"| {total_images} frames → {num_pairs} pairs"
+                + (f" | {seg_len * total_images:.0f} cm total" if seg_len > 0 else "")
+            )
+            
+            if any(b is not None for b in annotated_bytes_list):
+                loop = asyncio.get_running_loop()
+                chart_bytes = await loop.run_in_executor(
+                    None, 
+                    lambda: build_compile_chart(
+                        annotated_bytes_list, pair_results, summary, chart_title,
+                        pair_cm_ranges=pair_cm_ranges,
+                    )
+                )
+                chart_key = f"inspections/{session.object_id}/{session.session_id}/chart/compile_chart.jpg"
+                chart_url = await s3_service.upload_bytes(chart_bytes, chart_key, "image/jpeg")
+                session.compile_chart_url = chart_url
+
+        await db.commit()
+        updated_sessions.append({
+            "session_id": session.session_id,
+            "compile_chart_url": session.compile_chart_url,
+            "images_generated": images_generated,
+            "frames": [{"frame_index": f.frame_index, "annotated_image_url": f.annotated_image_url} for f in frames]
+        })
+
+    return {
+        "success": True,
+        "object_id": object_id.upper(),
+        "sessions": updated_sessions
+    }

@@ -57,12 +57,88 @@ Required JSON format:
       "severity": "low"|"medium"|"high"|"critical",
       "estimated_count": "<Quantity if applicable>",
       "length_mm": 10.5,
-      "bounding_box": {"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
+      "location_description": "<Precise textual description of where the defect is located (e.g., 'Bottom toe of the weld on the right side')>"
     }
   ],
   "standards_compliance": [
     {"standard": "AWS D1.1", "compliant": false, "notes": "<Reason>"},
     {"standard": "ISO 5817", "compliant": false, "notes": "<Reason>"}
+  ],
+  "recommendations": [
+    "<Actionable recommendation 1>"
+  ],
+  "model_notes": "<Any additional model notes or disclaimers>"
+}
+"""
+
+WELD_LOCALIZATION_PROMPT = """\
+You are an expert computer vision system. I have already identified a list of weld defects in the provided image.
+Your ONLY job is to locate these specific defects and provide their precise bounding box coordinates.
+
+The bounding box format MUST be an object with normalized coordinates between 0.0 and 1.0, where:
+x = left edge, y = top edge, width = width of the box, height = height of the box.
+
+Focus entirely on tight precision around the defect. DO NOT identify new defects. ONLY locate the ones provided.
+
+Inputs:
+{defects_json}
+
+Return EXACTLY in this JSON format:
+{
+  "defects": [
+    {
+      "defect_id": "<Exact defect_id from input>",
+      "bounding_box": {"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
+    }
+  ]
+}
+"""
+
+WELD_MEASUREMENT_INSPECTION_PROMPT = """\
+Act as an expert Certified Welding Inspector (CWI).
+
+I have provided an image of a weld. Your task is to:
+1. Locate the physical scale/ruler in the image (usually at the bottom of the image).
+2. Determine the physical dimensions of the weld based on that scale.
+3. Inspect the entire weld for all types of defects (blowholes, porosity, undercut, overcut, underfill, excess reinforcement, spatter, lack of fusion, cracks, etc.).
+4. For each defect found, you MUST calculate its physical measurements (length_mm, width_mm, depth_mm if applicable) based strictly on the scale you read from the image.
+5. Provide precise bounding box coordinates for each defect, tightly clamped to the visible defect boundary (0.0 to 1.0 relative, where x=0 is left, y=0 is top, x=1 is right, y=1 is bottom).
+
+CRITICAL INSTRUCTIONS TO PREVENT TRUNCATION:
+- Do NOT list dozens of tiny individual defects.
+- Group widespread or clustered defects (like spatter or porosity) into a SINGLE large bounding box encompassing the area.
+- Limit your output to a MAXIMUM of 15 major defect zones per image to ensure your response completes fully without being cut off.
+
+Return the result EXACTLY in the JSON format below.
+
+Required JSON format:
+{
+  "valid": true,
+  "overall_result": "pass"|"fail"|"review",
+  "weld_quality_score": 90,
+  "scale_detected": true,
+  "scale_notes": "<Brief explanation of the scale read from the image, e.g. '0 to 80 cm scale found at bottom'>",
+  "defect_summary": {
+    "Spatter": 2,
+    "Undercut": 1
+  },
+  "defects": [
+    {
+      "defect_id": "Seq 1",
+      "type": "<Defect Type>",
+      "label": "<Descriptive Label e.g. 'Undercut' or 'Spatter'>",
+      "description": "<Remarks>",
+      "severity": "low"|"medium"|"high"|"critical",
+      "estimated_count": "<Quantity if applicable>",
+      "length_mm": 10.5,
+      "width_mm": 2.1,
+      "depth_mm": 0.0,
+      "location_description": "<Precise textual description of where the defect is located>",
+      "bounding_box": {"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
+    }
+  ],
+  "standards_compliance": [
+    {"standard": "AWS D1.1", "compliant": false, "notes": "<Reason>"}
   ],
   "recommendations": [
     "<Actionable recommendation 1>"
@@ -133,24 +209,36 @@ def _salvage_truncated_json(raw: str) -> dict:
 
 class GeminiService:
     def __init__(self):
-        self.model = genai.GenerativeModel("gemini-2.5-flash")
+        self.default_model_name = "gemini-2.5-flash"
+        self.model = genai.GenerativeModel(self.default_model_name)
 
-    async def _call_gemini(self, prompt: str, image_bytes: bytes, mime_type: str) -> str:
+    def _get_model(self, model_name: str | None = None):
+        if model_name and model_name != self.default_model_name:
+            return genai.GenerativeModel(model_name)
+        return self.model
+
+    async def _call_gemini(self, prompt: str, image_bytes: bytes, mime_type: str, model_name: str | None = None) -> str:
         """Raw Gemini call — returns stripped text with rate limit retries."""
         import asyncio
         import time
         from google.api_core.exceptions import ResourceExhausted, DeadlineExceeded, ServiceUnavailable, InternalServerError
         
+        model = self._get_model(model_name)
+        
+        # gemini-2.5-flash-image does not support JSON mode
+        generation_config = genai.GenerationConfig(
+            temperature=0.6,
+            max_output_tokens=8192,
+        )
+        if model_name != "gemini-2.5-flash-image":
+            generation_config.response_mime_type = "application/json"
+
         for attempt in range(4):
             try:
                 start = time.time()
-                response = await self.model.generate_content_async(
+                response = await model.generate_content_async(
                     [prompt, {"mime_type": mime_type, "data": image_bytes}],
-                    generation_config=genai.GenerationConfig(
-                        temperature=0.6,
-                        max_output_tokens=8192,
-                        response_mime_type="application/json",
-                    ),
+                    generation_config=generation_config,
                     request_options={"timeout": 600}
                 )
                 elapsed = round(time.time() - start, 2)
@@ -174,14 +262,14 @@ class GeminiService:
                 logger.warning(f"Gemini API hit {type(e).__name__}. Waiting {wait_time}s before retry...")
                 await asyncio.sleep(wait_time)
 
-    async def _call_gemini_unified(self, image_bytes: bytes, mime_type: str) -> dict:
+    async def _call_gemini_unified(self, image_bytes: bytes, mime_type: str, model_name: str | None = None) -> dict:
         """
         Single Gemini call that handles both weld validation and full analysis.
         Returns the parsed dict. Raises HTTPException(422) for non-weld images
         and HTTPException(503) for API/parse failures.
         """
         try:
-            raw = await self._call_gemini(WELD_INSPECTION_PROMPT, image_bytes, mime_type)
+            raw = await self._call_gemini(WELD_INSPECTION_PROMPT, image_bytes, mime_type, model_name=model_name)
             data = _salvage_truncated_json(raw)
 
             # Gate check: model flagged image as non-weld
@@ -201,6 +289,32 @@ class GeminiService:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=f"AI processing failed: {str(e)}",
+            )
+
+    async def inspect_with_measurements(self, image_bytes: bytes, mime_type: str = "image/jpeg", model_name: str | None = None) -> dict:
+        """
+        Inspects an image, reads its scale, and calculates physical measurements of defects.
+        """
+        try:
+            raw = await self._call_gemini(WELD_MEASUREMENT_INSPECTION_PROMPT, image_bytes, mime_type, model_name=model_name)
+            data = _salvage_truncated_json(raw)
+
+            if not data.get("valid", True):
+                reason = data.get("reason", "Not a weld image")
+                logger.warning(f"Non-weld image rejected: {reason}")
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Image rejected: {reason}",
+                )
+
+            return data
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Gemini measurement inspection failed: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"AI measurement inspection failed: {str(e)}",
             )
 
     # Keep as thin shim so callers that still reference validate_weld_image don't break
@@ -224,9 +338,10 @@ class GeminiService:
         start_cm: float = 0.0,
         length_cm: float = 0.0,
         mime_type: str = "image/jpeg",
+        model_name: str | None = None,
     ) -> FramePairResult:
         """Analyze a stitched frame pair and return a FramePairResult."""
-        raw = await self._call_gemini_unified(stitched_bytes, mime_type)
+        raw = await self._call_gemini_unified(stitched_bytes, mime_type, model_name=model_name)
 
         defects = []
         for d in raw.get("defects", []):
@@ -284,8 +399,7 @@ class GeminiService:
                     label=d.get("label"),
                     severity=DefectSeverity(sev),
                     description=str(d.get("description", "")),
-                    confidence=float(d.get("confidence", 0.8)),
-                    bounding_box=BoundingBox(**bb) if bb else None,
+                    bounding_box=None,
                     length_mm=length_mm,
                     depth_mm=depth_mm,
                     width_mm=width_mm,
@@ -337,5 +451,56 @@ class GeminiService:
             model_notes=raw.get("model_notes"),
         )
 
+    async def custom_image_inspection(self, image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        prompt = "check the image and find welding defects like undercut, underfill, blowholes, excessreinforcement and spatters and every possible defect , mark all defects and create one image with all defects marked dwon precisely"
+        import asyncio
+        for attempt in range(3):
+            try:
+                response = await self.model.generate_content_async(
+                    [prompt, {"mime_type": mime_type, "data": image_bytes}],
+                    generation_config=genai.GenerationConfig(
+                        temperature=0.4,
+                    )
+                )
+                return response.text
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(2)
+
+    async def locate_defects(self, image_bytes: bytes, defects: list, mime_type: str = "image/jpeg", model_name: str | None = None) -> dict:
+        """
+        Pass 2: Localization. Ask Gemini to provide bounding boxes for specific known defects.
+        Returns a dict mapping defect_id to BoundingBox object.
+        """
+        if not defects:
+            return {}
+
+        defects_list = []
+        for d in defects:
+            defects_list.append({
+                "defect_id": d.defect_id,
+                "type": d.type,
+                "label": d.label,
+                "description": d.description,
+                "location_description": getattr(d, 'position', None) or d.description
+            })
+            
+        prompt = WELD_LOCALIZATION_PROMPT.replace("{defects_json}", json.dumps(defects_list, indent=2))
+        
+        raw = await self._call_gemini(prompt, image_bytes, mime_type, model_name=model_name)
+        data = _salvage_truncated_json(raw)
+        
+        bboxes = {}
+        for d in data.get("defects", []):
+            did = d.get("defect_id")
+            bb = d.get("bounding_box")
+            if did and isinstance(bb, dict):
+                x = max(0.0, min(1.0, float(bb.get("x", 0))))
+                y = max(0.0, min(1.0, float(bb.get("y", 0))))
+                w = max(0.01, min(1.0, float(bb.get("width", 0.1))))
+                h = max(0.01, min(1.0, float(bb.get("height", 0.1))))
+                bboxes[did] = BoundingBox(x=x, y=y, width=w, height=h)
+        return bboxes
 
 gemini_service = GeminiService()

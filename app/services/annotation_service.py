@@ -465,25 +465,32 @@ def annotate_image(image_bytes: bytes, defects: List[Defect]) -> bytes:
             best_area = -1
             best_anchor = None
             best_bb_cx = 0
-
+    
             # Draw all shapes for this group
             for defect in defect_group:
                 bb = defect.bounding_box
                 if not bb:
-                    continue
-
-                x1 = max(0, int(bb.x * w))
-                y1 = max(0, int(bb.y * h))
-                x2 = min(w - 1, int((bb.x + bb.width) * w))
-                y2 = min(h - 1, int((bb.y + bb.height) * h))
+                    # If Gemini failed to locate it, give it a tiny default bounding box in the center
+                    # so it still gets drawn and pointed to
+                    bb_x, bb_y = 0.45, 0.45
+                    bb_w, bb_h = 0.1, 0.1
+                    x1 = int(bb_x * w)
+                    y1 = int(bb_y * h)
+                    x2 = int((bb_x + bb_w) * w)
+                    y2 = int((bb_y + bb_h) * h)
+                else:
+                    x1 = max(0, int(bb.x * w))
+                    y1 = max(0, int(bb.y * h))
+                    x2 = min(w - 1, int((bb.x + bb.width) * w))
+                    y2 = min(h - 1, int((bb.y + bb.height) * h))
                 
                 if x2 - x1 < 10: x2 = min(w - 1, x1 + 10)
                 if y2 - y1 < 10: y2 = min(h - 1, y1 + 10)
-
+    
                 bb_cx = (x1 + x2) // 2
                 bb_cy = (y1 + y2) // 2
                 arrow_target = (bb_cx, bb_cy)
-
+    
                 # ─────────────────────────────────────────────────────────────────
                 # Draw EXACT Defect Shapes
                 # ─────────────────────────────────────────────────────────────────
@@ -494,16 +501,16 @@ def annotate_image(image_bytes: bytes, defects: List[Defect]) -> bytes:
                         _draw_wavy_line(draw, (x1, y2), (x2, y2), color255,
                                         width=line_w, amplitude=max(2, int(4 * scale)))
                     arrow_target = (bb_cx, y1)
-
+    
                 elif "underfill" in t or "valley" in t:
                     _draw_scalloped_bracket(draw, x1, y1, x2, y2, color255, width=line_w + 1)
                     arrow_target = (bb_cx, (y1 + y2) // 2)
-
+    
                 elif "excess" in t or "reinforcement" in t or "hump" in t:
                     _draw_bumpy_polygon(draw, x1, y1, x2, y2, color255,
                                         width=line_w, bumps=12, amplitude=max(3, int(6 * scale)))
                     arrow_target = (bb_cx, y1)
-
+    
                 elif "blowhole" in t or "poros" in t:
                     import re as _re
                     n = 5
@@ -512,7 +519,7 @@ def annotate_image(image_bytes: bytes, defects: List[Defect]) -> bytes:
                         if nums: n = min(25, max(1, int(nums[0])))
                     centers = _draw_blowhole_circles(draw, x1, y1, x2, y2, color, n, scale, defect.defect_id)
                     arrow_target = centers[0] if centers else (bb_cx, bb_cy)
-
+    
                 elif "spatter" in t:
                     import re as _re
                     n = 20
@@ -521,12 +528,12 @@ def annotate_image(image_bytes: bytes, defects: List[Defect]) -> bytes:
                         if nums: n = min(80, max(5, int(nums[0])))
                     _draw_spatter_dots(draw, x1, y1, x2, y2, color, n, scale, defect.defect_id)
                     arrow_target = (bb_cx, bb_cy)
-
+    
                 elif "fusion" in t or "penetration" in t:
                     _draw_wavy_line(draw, (x1, bb_cy), (x2, bb_cy), color255,
                                     width=line_w, amplitude=max(2, int(3 * scale)), frequency=0.06)
                     arrow_target = (bb_cx, bb_cy)
-
+    
                 elif "overlap" in t:
                     seg = 18
                     gap = 8
@@ -539,13 +546,18 @@ def annotate_image(image_bytes: bytes, defects: List[Defect]) -> bytes:
                 else:
                     draw.ellipse([x1, y1, x2, y2], outline=color255, width=line_w)
                     arrow_target = (bb_cx, y1)
-
+    
                 # Check if this is the largest region for anchoring the label
                 area = (x2 - x1) * (y2 - y1)
                 if area > best_area:
                     best_area = area
                     best_anchor = arrow_target
                     best_bb_cx = bb_cx
+    
+        # We will not draw floating labels anymore, the legend takes care of it
+        pass
+
+        _draw_legend(draw, w, h, label_font, defects)
 
         # Composite everything
         composited  = Image.alpha_composite(img, overlay)
