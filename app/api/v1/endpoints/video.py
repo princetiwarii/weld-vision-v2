@@ -160,7 +160,7 @@ async def analyze_weld_images(
 
     total_images = len(image_data)
 
-    s3_service.ensure_object_folder(object_id)
+    await s3_service.ensure_object_folder(object_id)
     logger.info(f"[{session_id}] S3 object folder ensured: inspections/{object_id}/")
 
     db_session = await _persist_session(
@@ -198,7 +198,7 @@ async def analyze_weld_images(
             )
 
             stitch_key   = f"inspections/{object_id}/{session_id}/frames/stitched/{label_a}.jpg"
-            stitched_url = s3_service.upload_bytes(stitched, stitch_key, "image/jpeg")
+            stitched_url = await s3_service.upload_bytes(stitched, stitch_key, "image/jpeg")
 
             logger.info(
                 f"[{session_id}] Stitched pair {label_a}"
@@ -221,7 +221,7 @@ async def analyze_weld_images(
 
         elapsed = round(time.time() - t_start, 2)
         await db.commit()
-        logger.info(f"[{session_id}] ✓ Done in {elapsed}s — {total_images} images, {num_pairs} pairs")
+        logger.info(f"[{session_id}] OK: Done in {elapsed}s — {total_images} images, {num_pairs} pairs")
 
     except HTTPException:
         await db.rollback()

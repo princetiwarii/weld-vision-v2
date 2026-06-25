@@ -1,59 +1,3 @@
-# """
-# image_stitcher.py
-# =================
-# Stitch two frame JPEGs side-by-side into one image before sending
-# to Gemini.  This halves the number of API calls while giving the
-# model full context of adjacent weld sections.
-
-# If only one image is available (odd-total-frame edge case) the
-# single image is returned unchanged.
-# """
-# from PIL import Image
-# import io
-# from loguru import logger
-
-# DIVIDER_WIDTH = 4          # px separator between the two halves
-# DIVIDER_COLOR = (60, 60, 60)   # dark grey
-
-
-# def stitch_pair(frame_a: bytes, frame_b: bytes | None) -> bytes:
-#     """
-#     Stitch frame_a and frame_b horizontally.
-#     If frame_b is None returns frame_a as-is.
-#     """
-#     if frame_b is None:
-#         return frame_a
-
-#     try:
-#         img_a = Image.open(io.BytesIO(frame_a)).convert("RGB")
-#         img_b = Image.open(io.BytesIO(frame_b)).convert("RGB")
-
-#         # Normalise heights — resize B to match A's height
-#         ha, wa = img_a.size[1], img_a.size[0]
-#         hb, wb = img_b.size[1], img_b.size[0]
-
-#         if ha != hb:
-#             scale  = ha / hb
-#             new_wb = int(wb * scale)
-#             img_b  = img_b.resize((new_wb, ha), Image.LANCZOS)
-#             wb     = new_wb
-
-#         # Canvas = A + divider + B
-#         total_w = wa + DIVIDER_WIDTH + wb
-#         canvas  = Image.new("RGB", (total_w, ha), DIVIDER_COLOR)
-#         canvas.paste(img_a, (0, 0))
-#         canvas.paste(img_b, (wa + DIVIDER_WIDTH, 0))
-
-#         buf = io.BytesIO()
-#         canvas.save(buf, format="JPEG", quality=90)
-#         logger.debug(f"Stitched pair → {total_w}×{ha}px")
-#         return buf.getvalue()
-
-#     except Exception as e:
-#         logger.error(f"Stitch failed, returning frame_a only: {e}")
-#         return frame_a
-
-
 """
 image_stitcher.py
 =================
@@ -115,11 +59,20 @@ def _draw_scale_bar(
             tick_interval = iv
             break
 
-    try:
-        font = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 9
-        )
-    except Exception:
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
+    ]
+    font = None
+    for fp in font_paths:
+        try:
+            font = ImageFont.truetype(fp, 9)
+            break
+        except Exception:
+            pass
+    if font is None:
         font = ImageFont.load_default()
 
     cm = start_cm
@@ -206,8 +159,8 @@ def stitch_pair(
             # Scale bar spans the full stitched width but split at the divider
             # Left half: start_cm_a → start_cm_a + length_cm_a
             # Right half: start_cm_a + length_cm_a → start_cm_a + length_cm_a + length_cm_b
-            end_cm_a   = start_cm_a + length_cm_a
-            end_cm_b   = end_cm_a + length_cm_b
+            end_cm_a = start_cm_a + length_cm_a
+            end_cm_b = end_cm_a + length_cm_b
 
             # Draw as one continuous bar across both halves
             _draw_scale_bar(draw, 0, ha, wa, SCALE_H, start_cm_a, end_cm_a)

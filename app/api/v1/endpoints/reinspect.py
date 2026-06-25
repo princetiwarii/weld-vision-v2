@@ -179,7 +179,7 @@ async def reinspect_object(
         logger.info(f"Gemini re-analysis [{i+1}/{len(frames_with_image)}] frame={frame.image_label}")
 
         # Fresh Gemini call — reuse the existing service
-        pair_result: FramePairResult = gemini_service.analyze_pair(
+        pair_result: FramePairResult = await gemini_service.analyze_pair(
             stitched_bytes=raw_bytes,
             frame_index=frame.frame_index,
             image_label=frame.image_label,
@@ -202,7 +202,7 @@ async def reinspect_object(
             f"inspections/{object_id}/reinspect/{session.session_id}/"
             f"annotated_{frame.frame_index:03d}_{frame.image_label}.jpg"
         )
-        new_annotated_url = s3_service.upload_bytes(annotated, s3_key, "image/jpeg")
+        new_annotated_url = await s3_service.upload_bytes(annotated, s3_key, "image/jpeg")
         logger.info(f"Uploaded re-annotated image → {new_annotated_url}")
 
         frame_results.append(
@@ -268,7 +268,7 @@ async def reinspect_object(
     chart_key = (
         f"inspections/{object_id}/reinspect/{session.session_id}/compile_chart.jpg"
     )
-    compile_chart_url = s3_service.upload_bytes(chart_bytes, chart_key, "image/jpeg")
+    compile_chart_url = await s3_service.upload_bytes(chart_bytes, chart_key, "image/jpeg")
     logger.info(f"Compile chart uploaded → {compile_chart_url}")
 
     # ------------------------------------------------------------------

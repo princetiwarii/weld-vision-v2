@@ -8,3 +8,10 @@ venv/
 Thumbs.db
 .vscode/
 .idea/
+
+# Dev-only / local testing utilities — not part of production pipeline
+demo_langchain.py
+inject_json.py
+check_db.py
+test_output.json
+logs/

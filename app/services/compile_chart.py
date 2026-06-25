@@ -95,10 +95,14 @@ def _fonts():
     bold = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "C:/Windows/Fonts/arialbd.ttf",
+        "C:/Windows/Fonts/segoeuib.ttf",
     ]
     reg = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
     ]
     return (
         _load_font(bold, 46),   # [0] page title
@@ -169,7 +173,6 @@ def _draw_defect_strip(draw, x, y, w, h, res: FramePairResult, font):
         return
 
     # Build compact defect tokens: colored text per defect type
-    tokens = []
     seen_types = {}
     for d in res.defects:
         t = d.type

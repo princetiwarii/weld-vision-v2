@@ -153,7 +153,7 @@ async def upload_point_cloud(
                         mesh_bytes = mf.read()
                     
                     mesh_s3_key = f"pointclouds/{object_id}/{scan_id}/mesh_{filename}"
-                    mesh_s3_url = s3_service.upload_bytes(
+                    mesh_s3_url = await s3_service.upload_bytes(
                         data=mesh_bytes,
                         key=mesh_s3_key,
                         content_type="application/octet-stream",
@@ -163,7 +163,7 @@ async def upload_point_cloud(
 
     # Upload to S3
     s3_key = f"pointclouds/{object_id}/{scan_id}/{filename}"
-    s3_url = s3_service.upload_bytes(
+    s3_url = await s3_service.upload_bytes(
         data=raw_bytes,
         key=s3_key,
         content_type="application/octet-stream",

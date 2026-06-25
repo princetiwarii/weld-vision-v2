@@ -35,8 +35,8 @@ async def delete_object(object_id: str, db: AsyncSession = Depends(get_db)):
     pointcloud_prefix = f"pointclouds/{object_id}/"
 
     try:
-        s3_deleted_count += s3_service.delete_prefix(inspection_prefix)
-        s3_deleted_count += s3_service.delete_prefix(pointcloud_prefix)
+        s3_deleted_count += await s3_service.delete_prefix(inspection_prefix)
+        s3_deleted_count += await s3_service.delete_prefix(pointcloud_prefix)
     except Exception as e:
         logger.error(f"Error deleting S3 objects for {object_id}: {e}")
         # Proceed with DB deletion even if S3 fails partially, 

@@ -16,7 +16,7 @@ logger = setup_logging()
 async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.APP_NAME} [{settings.APP_ENV}]")
     await create_tables()
-    logger.info("Database tables ensured ✓")
+    logger.info("Database tables ensured OK")
     yield
     logger.info("Shutdown complete")
 
