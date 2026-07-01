@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.middleware.cors import CORSMiddleware
 import time
 
@@ -49,7 +50,7 @@ Designed for the **WeldVision mobile app** (iOS/Swift).
 Frames are labelled `{object_id}{N}` — e.g. object_id=`A` → frames `A1`, `A2`, `A3` …  
 Pairs are stitched: `A1+A2` → one Gemini call, `A3+A4` → next call, etc.
     """,
-    docs_url="/docs",
+    docs_url=None,
     redoc_url="/redoc",
     lifespan=lifespan,
 )
@@ -88,6 +89,30 @@ async def server_error(request: Request, exc):
 
 
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
+
+
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui_html():
+    html_resp = get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} — Swagger UI",
+        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-themes@3.0.0/themes/3.x/theme-material.css",
+        swagger_favicon_url="https://fastapi.tiangolo.com/img/favicon.png",
+    )
+    body = html_resp.body.decode("utf-8")
+    dark_css = """
+    <style>
+      body { background-color: #1e1e1e !important; color: #c9d1d9 !important; }
+      .swagger-ui .scheme-container { background-color: #1e1e1e !important; box-shadow: none !important; }
+      .swagger-ui .topbar { display: none; }
+      .swagger-ui .info .title { color: #58a6ff !important; }
+      .swagger-ui .info p, .swagger-ui .info li { color: #c9d1d9 !important; }
+      .swagger-ui .opblock .opblock-section-header { background-color: #2d333b !important; }
+      .swagger-ui .table-container table { color: #c9d1d9 !important; }
+    </style>
+    """
+    body = body.replace("</head>", f"{dark_css}</head>")
+    return HTMLResponse(content=body)
 
 
 @app.get("/", tags=["Health"])
