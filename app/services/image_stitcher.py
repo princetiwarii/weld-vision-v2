@@ -19,6 +19,9 @@ from loguru import logger
 DIVIDER_WIDTH  = 4             # px separator between the two halves
 DIVIDER_COLOR  = (60, 60, 60)  # dark grey
 
+# Max width sent to Gemini — prevents oversized payloads and attention dilution
+MAX_OUTPUT_WIDTH = 1280
+
 SCALE_H        = 28            # height of the scale-bar strip
 SCALE_BG       = (20, 20, 28)
 SCALE_TICK_COL = (180, 180, 200)
@@ -129,8 +132,12 @@ def stitch_pair(
                     draw, 0, ha, wa, SCALE_H,
                     start_cm_a, start_cm_a + length_cm_a,
                 )
+                if canvas.width > MAX_OUTPUT_WIDTH:
+                    scale_factor = MAX_OUTPUT_WIDTH / canvas.width
+                    new_h = int(canvas.height * scale_factor)
+                    canvas = canvas.resize((MAX_OUTPUT_WIDTH, new_h), Image.LANCZOS)
                 buf = io.BytesIO()
-                canvas.save(buf, format="JPEG", quality=90)
+                canvas.save(buf, format="JPEG", quality=88)
                 return buf.getvalue()
             return frame_a
 
@@ -172,10 +179,17 @@ def stitch_pair(
                 fill=DIVIDER_COLOR,
             )
 
+        # Cap width to MAX_OUTPUT_WIDTH to prevent oversized Gemini payloads
+        if canvas.width > MAX_OUTPUT_WIDTH:
+            scale_factor = MAX_OUTPUT_WIDTH / canvas.width
+            new_h = int(canvas.height * scale_factor)
+            canvas = canvas.resize((MAX_OUTPUT_WIDTH, new_h), Image.LANCZOS)
+            logger.debug(f"Stitched image downscaled to {MAX_OUTPUT_WIDTH}×{new_h}px")
+
         buf = io.BytesIO()
-        canvas.save(buf, format="JPEG", quality=90)
+        canvas.save(buf, format="JPEG", quality=88)
         logger.debug(
-            f"Stitched pair → {total_w}×{canvas_h}px  "
+            f"Stitched pair → {canvas.width}×{canvas.height}px  "
             f"[{start_cm_a:.1f}–{start_cm_a + length_cm_a + length_cm_b:.1f} cm]"
         )
         return buf.getvalue()

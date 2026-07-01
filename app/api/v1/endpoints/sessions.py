@@ -25,7 +25,7 @@ from app.schemas.inspection import (
     FrameUrlSummary,
 )
 from app.services.stats_service import compute_statistics
-from app.services.gemini_service import gemini_service
+from app.services.gemini_service import gemini_service, build_rich_text_output, build_object_summary_table
 from app.services.annotation_service import annotate_image
 from app.services.s3_service import s3_service
 from app.services.compile_chart import build_compile_chart
@@ -43,6 +43,8 @@ def _orm_defects_to_schema(db_defects: List[FrameDefect]) -> List[Defect]:
             out.append(Defect(
                 defect_id=d.defect_id,
                 type=d.defect_type,
+                label=d.defect_type,  # Fallback to type since label isn't in DB
+                estimated_count=None, # Not in DB
                 severity=DefectSeverity(d.severity),
                 description=d.description or "",
                 confidence=d.confidence,
@@ -54,7 +56,8 @@ def _orm_defects_to_schema(db_defects: List[FrameDefect]) -> List[Defect]:
                 standards_reference=d.standards_reference,
                 recommendation=d.recommendation,
             ))
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to map defect {d.defect_id}: {e}")
             continue
     return out
 
@@ -124,8 +127,6 @@ def _orm_session_to_summary(s: InspectionSession, include_frames: bool = False) 
     )
 
 
-
-
 # ---------------------------------------------------------------------------
 # List sessions
 # ---------------------------------------------------------------------------
@@ -152,8 +153,6 @@ async def list_sessions(
         "count": len(sessions),
         "sessions": [_orm_session_to_summary(s) for s in sessions],
     }
-
-
 
 
 class ManualAnnotationUpdate(BaseModel):
@@ -204,7 +203,7 @@ async def override_images(
         )
         db.add(session)
         await db.flush()
-        
+
         frames = []
         # Create a frame for each annotated image provided
         for i in range(len(annotated_images)):
@@ -219,7 +218,7 @@ async def override_images(
         await db.flush()
     else:
         frames = sorted(session.frames, key=lambda x: x.frame_index)
-        
+
     # 1. Update Compiled Chart
     chart_bytes = await compiled_chart.read()
     chart_key = f"inspections/{session.object_id}/{session.session_id}/chart/compile_chart_manual.jpg"
@@ -241,14 +240,14 @@ async def override_images(
     frames_updated = 0
     for frame in frames:
         label_upper = frame.image_label.upper()
-        
+
         # Look for a match
         matched_file = None
         for key, file_obj in uploaded_files_map.items():
             if label_upper == key or label_upper in key:
                 matched_file = file_obj
                 break
-        
+
         if matched_file:
             img_bytes = await matched_file.read()
             key = f"inspections/{session.object_id}/{session.session_id}/frames/annotated/{frame.image_label}_manual.jpg"
@@ -267,10 +266,6 @@ async def override_images(
         "compile_chart_url": session.compile_chart_url,
         "frames_updated": frames_updated
     }
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +301,7 @@ async def get_manual_sessions_by_object(
 
     for session in sessions:
         frames = sorted(session.frames, key=lambda x: x.frame_index)
-        
+
         # Auto-finalize removed. Session will be finalized when the compiled chart is manually uploaded via PUT.
 
         pair_results = [_orm_frame_to_schema(f) for f in frames]
@@ -363,15 +358,15 @@ async def inspect_object(
     for session in sessions:
         session.status = "processing"
         await db.commit()
-        
+
         frames = sorted(session.frames, key=lambda x: x.frame_index)
         pair_results = []
         raw_gemini_outputs = []
-        
+
         for frame in frames:
             if not frame.stitched_image_url or ".amazonaws.com/" not in frame.stitched_image_url:
                 continue
-                
+
             stitch_key = frame.stitched_image_url.split(".amazonaws.com/")[1]
             try:
                 stitched_bytes = await s3_service.download_bytes(stitch_key)
@@ -392,21 +387,26 @@ async def inspect_object(
             frame.standards_compliance = raw_result.get("standards_compliance", [])
             frame.recommendations = raw_result.get("recommendations", [])
             frame.model_notes = raw_result.get("model_notes", "")
-            
+
             # Clear old defects
             for d in frame.defects:
                 await db.delete(d)
-            
+
             defects_parsed = []
             for d in raw_result.get("defects", []):
                 bb = d.get("bounding_box", {})
+                # Handle label and estimated_count by prepending to description
+                desc_text = d.get("description", "")
+                if d.get("estimated_count"):
+                    desc_text = f"Count: {d.get('estimated_count')} | " + desc_text
+                
                 new_defect = FrameDefect(
                     frame_id=frame.id,
                     session_id=session.session_id,
                     defect_id=d.get("defect_id", str(uuid.uuid4())[:8]),
                     defect_type=d.get("type", "Unknown"),
                     severity=d.get("severity", "medium"),
-                    description=d.get("description", ""),
+                    description=desc_text,
                     confidence=d.get("confidence", 1.0),
                     bb_x=bb.get("x") if bb else None,
                     bb_y=bb.get("y") if bb else None,
@@ -422,7 +422,7 @@ async def inspect_object(
 
             # Update frame relationship so it can be passed to schema
             frame.defects = defects_parsed
-            
+
             pair_results.append(_orm_frame_to_schema(frame))
             raw_gemini_outputs.append(raw_result)
 
@@ -436,28 +436,35 @@ async def inspect_object(
             session.pass_count = summary.pass_count
             session.fail_count = summary.fail_count
             session.review_count = summary.review_count
-            
+
         session.status = "completed"
         session.completed_at = datetime.now(timezone.utc)
         await db.commit()
-        
+
+        # Build rich per-image text outputs with measurements
         frames_out = []
         for frame, ro in zip(frames, raw_gemini_outputs):
-            frames_out.append({
-                "image_label": frame.image_label,
-                "text_output": ro
-            })
+            rich = build_rich_text_output(
+                image_label=frame.image_label,
+                stitched_image_url=frame.stitched_image_url or "",
+                raw_result=ro,
+            )
+            frames_out.append(rich)
+
+        # Build cross-image summary table
+        object_summary = build_object_summary_table(frames_out) if frames_out else {}
 
         summary_dict = {}
         if pair_results:
             summary_dict = compute_statistics(pair_results).model_dump()
-        
+
         updated_sessions.append({
             "session_id": session.session_id,
             "status": session.status,
             "images_analyzed": len(frames_out),
-            "defects_per_image": frames_out,
-            "overall_summary": summary_dict
+            "per_image_results": frames_out,
+            "object_summary_table": object_summary,
+            "statistical_summary": summary_dict,
         })
 
     return {
@@ -499,7 +506,7 @@ async def generate_images_for_object(
     updated_sessions = []
     for session in sessions:
         frames = sorted(session.frames, key=lambda x: x.frame_index)
-        
+
         annotated_bytes_list = []
         pair_results = []
         pair_cm_ranges = []
@@ -517,7 +524,7 @@ async def generate_images_for_object(
                 logger.warning(f"[{session.session_id}] Missing stitched URL for frame {frame.frame_index}")
                 annotated_bytes_list.append(None)
                 continue
-            
+
             stitch_key = frame.stitched_image_url.split(".amazonaws.com/")[1]
             try:
                 stitched_bytes = await s3_service.download_bytes(stitch_key)
@@ -528,14 +535,14 @@ async def generate_images_for_object(
 
             # Load defects from DB and convert to schema
             pair_result: FramePairResult = _orm_frame_to_schema(frame)
-            
+
             # API 2 specific: We DO NOT call Gemini again. We trust the JSON coordinates
             # and draw using Python for 100% precision.
             loop = asyncio.get_running_loop()
-            annotated_bytes = await loop.run_in_executor(None, annotate_image, stitched_bytes, pair_result.defects)
+            annotated_bytes = await loop.run_in_executor(None, annotate_image, stitched_bytes, pair_result.defects, pair_result.overall_result.value)
             ann_key = f"inspections/{session.object_id}/{session.session_id}/frames/annotated/{frame.image_label}_annotated.jpg"
             annotated_url = await s3_service.upload_bytes(annotated_bytes, ann_key, "image/jpeg")
-            
+
             frame.annotated_image_url = annotated_url
             pair_result.annotated_image_url = annotated_url
 
@@ -547,7 +554,7 @@ async def generate_images_for_object(
             summary = compute_statistics(pair_results)
             total_images = session.frames_extracted
             num_pairs = len(frames)
-            
+
             chart_title = (
                 f"WeldVision — {session.object_name or session.object_id} "
                 f"| Scan {session.scan_number or 'N/A'} "
@@ -555,11 +562,11 @@ async def generate_images_for_object(
                 f"| {total_images} frames → {num_pairs} pairs"
                 + (f" | {seg_len * total_images:.0f} cm total" if seg_len > 0 else "")
             )
-            
+
             if any(b is not None for b in annotated_bytes_list):
                 loop = asyncio.get_running_loop()
                 chart_bytes = await loop.run_in_executor(
-                    None, 
+                    None,
                     lambda: build_compile_chart(
                         annotated_bytes_list, pair_results, summary, chart_title,
                         pair_cm_ranges=pair_cm_ranges,
