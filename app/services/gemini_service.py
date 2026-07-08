@@ -59,6 +59,7 @@ Required JSON format:
       "severity": "low"|"medium"|"high"|"critical",
       "estimated_count": "<Quantity if applicable>",
       "length_mm": 10.5,
+      "bounding_box": {"x": 0.15, "y": 0.25, "width": 0.08, "height": 0.04},
       "location_description": "<Precise textual description of where the defect is located (e.g., 'Bottom toe of the weld on the right side')>"
     }
   ],
@@ -647,10 +648,12 @@ class GeminiService:
                 loc_data = await self._localize_defects_with_crop(image_bytes, defects, mime_type, model_name)
                 bb_map = self._apply_weld_bead_constraints(defects, loc_data)
 
+                norm_bb_map = {str(k).strip().lower(): v for k, v in bb_map.items() if k}
                 for d in defects:
                     did = d.get("defect_id")
-                    if did in bb_map:
-                        d["bounding_box"] = bb_map[did]
+                    norm_did = str(did).strip().lower() if did else ""
+                    if norm_did in norm_bb_map:
+                        d["bounding_box"] = norm_bb_map[norm_did]
                     else:
                         d["bounding_box"] = None
 
@@ -696,14 +699,14 @@ class GeminiService:
                 defect_type = ""
                 for d in defects:
                     d_id = d.get("defect_id") if isinstance(d, dict) else getattr(d, "defect_id", None)
-                    if d_id == did:
+                    if d_id and str(d_id).strip().lower() == str(did).strip().lower():
                         defect_type = (d.get("type", "") if isinstance(d, dict) else getattr(d, "type", "")).lower()
                         break
 
                 is_weld_defect = any(k in defect_type for k in [
                     "undercut", "underfill", "fusion", "penetration", "profile",
                     "reinforcement", "hump", "blowhole", "porosity", "crack",
-                    "overlap", "crater", "burn"
+                    "overlap", "crater", "burn", "spatter", "slag"
                 ])
 
                 if valid_weld_beads and is_weld_defect:
@@ -783,7 +786,7 @@ class GeminiService:
                     severity=DefectSeverity(sev),
                     description=str(d.get("description", "")),
                     confidence=1.0,
-                    bounding_box=None,
+                    bounding_box=BoundingBox(**bb) if bb else None,
                     length_mm=length_mm,
                     depth_mm=_safe_float(d.get("depth_mm")),
                     width_mm=_safe_float(d.get("width_mm")),

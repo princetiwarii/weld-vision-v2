@@ -195,10 +195,7 @@ def _build_legend(defects: List[Defect], w: int, scale: float) -> Image.Image:
     font = _load_font(FONT_PATHS_BOLD, font_size)
     title_font = _load_font(FONT_PATHS_BOLD, max(11, int(13 * scale)))
 
-    present_colors = {_get_color(d) for d in defects}
-    items = [(name, col) for name, col in LEGEND_ITEMS if col in present_colors]
-    if not items:
-        items = [("No defects marked", DEFAULT_COLOR)]
+    items = LEGEND_ITEMS
 
     tmp = Image.new("RGB", (1, 1))
     tmp_d = ImageDraw.Draw(tmp)
@@ -253,20 +250,14 @@ def _draw_defect_shape(
         cx = (x1 + x2) // 2
         cy = (y1 + y2) // 2
         r  = max(8, min((x2 - x1), (y2 - y1)) // 2)
-        draw.ellipse([cx - r - 2, cy - r - 2, cx + r + 2, cy + r + 2],
-                     outline=(0, 0, 0), width=line_w + 3)
         draw.ellipse([cx - r, cy - r, cx + r, cy + r],
                      outline=color, width=line_w)
     elif shape == "oval":
         # Ellipse fitted to the full bounding box
-        draw.ellipse([x1 - 2, y1 - 2, x2 + 2, y2 + 2],
-                     outline=(0, 0, 0), width=line_w + 3)
         draw.ellipse([x1, y1, x2, y2],
                      outline=color, width=line_w)
     else:
         # Rectangle (default)
-        draw.rectangle([x1 - 2, y1 - 2, x2 + 2, y2 + 2],
-                       outline=(0, 0, 0), width=line_w + 3)
         draw.rectangle([x1, y1, x2, y2],
                        outline=color, width=line_w)
 
@@ -418,16 +409,13 @@ def annotate_image(
 
             _draw_defect_shape(draw, x1, y1, x2, y2, color, line_w, shape)
 
-        # ── Compose: header + weld + legend ───────────────────────────────────
-        # All three use priority_defects so counts are always consistent
-        header  = _build_header(w, overall_result, priority_defects, scale)
+        # ── Compose: weld image + legend bar (no top banner) ──────────────────
         legend  = _build_legend(priority_defects, w, scale)
-        total_h = header.height + h + legend.height
+        total_h = h + legend.height
 
         final = Image.new("RGB", (w, total_h), (10, 10, 20))
-        final.paste(header, (0, 0))
-        final.paste(img,    (0, header.height))
-        final.paste(legend, (0, header.height + h))
+        final.paste(img,    (0, 0))
+        final.paste(legend, (0, h))
 
         buf = io.BytesIO()
         final.save(buf, format="JPEG", quality=94)

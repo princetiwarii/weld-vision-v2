@@ -11,7 +11,7 @@ import asyncio
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, delete
 from sqlalchemy.orm import selectinload
 from loguru import logger
 from pydantic import BaseModel
@@ -266,6 +266,112 @@ async def override_images(
         "compile_chart_url": session.compile_chart_url,
         "frames_updated": frames_updated
     }
+
+
+class OverrideDefectItem(BaseModel):
+    defect_id: Optional[str] = None
+    type: str = "Undercut"
+    label: Optional[str] = None
+    description: Optional[str] = ""
+    severity: str = "medium"
+    length_mm: Optional[float] = 0.0
+    width_mm: Optional[float] = 0.0
+    depth_mm: Optional[float] = 0.0
+    start_cm: Optional[float] = None
+    end_cm: Optional[float] = None
+    location_side: Optional[str] = None
+    weld_zone: Optional[str] = None
+    location_description: Optional[str] = None
+    bounding_box: Optional[dict] = None
+
+class OverrideDefectsRequest(BaseModel):
+    defects: List[OverrideDefectItem]
+    frame_index: int = 0
+    total_weld_length_mm: Optional[float] = 250.0
+
+@router.put(
+    "/sessions/object/{object_id}/defects",
+    summary="Override/store defect coordinates for an object in DB",
+)
+async def override_defects_for_object(
+    object_id: str,
+    payload: OverrideDefectsRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Overwrites the stored defects and bounding box coordinates in DB for the specified frame of an object.
+    You can send raw JSON defect objects from your manual inspection, and when you call generate-images,
+    it will draw using these exact coordinates!
+    """
+    q = (
+        select(InspectionSession)
+        .where(InspectionSession.object_id == object_id.upper())
+        .options(selectinload(InspectionSession.frames).selectinload(InspectionFrame.defects))
+        .order_by(desc(InspectionSession.created_at))
+        .limit(1)
+    )
+    result = await db.execute(q)
+    session = result.scalar_one_or_none()
+
+    if not session:
+        raise HTTPException(status_code=404, detail=f"No inspection session found for object_id: {object_id}")
+
+    frames = sorted(session.frames, key=lambda x: x.frame_index)
+    if not frames:
+        raise HTTPException(status_code=404, detail=f"No frames found for session {session.session_id}")
+
+    target_frame = None
+    for f in frames:
+        if f.frame_index == payload.frame_index:
+            target_frame = f
+            break
+    if not target_frame:
+        target_frame = frames[0]
+
+    # Delete existing defects for this frame
+    await db.execute(delete(FrameDefect).where(FrameDefect.frame_id == target_frame.id))
+
+    defects_parsed = []
+    for d in payload.defects:
+        bb = d.bounding_box
+        if not bb and d.start_cm is not None:
+            from app.services.gemini_service import _estimate_bbox_from_text
+            bb = _estimate_bbox_from_text(d.model_dump(), payload.total_weld_length_mm or 250.0)
+
+        new_defect = FrameDefect(
+            frame_id=target_frame.id,
+            session_id=session.session_id,
+            defect_id=d.defect_id or str(uuid.uuid4())[:8],
+            defect_type=d.type or "Unknown",
+            severity=d.severity or "medium",
+            description=d.description or d.label or "",
+            confidence=1.0,
+            bb_x=bb.get("x") if bb else None,
+            bb_y=bb.get("y") if bb else None,
+            bb_width=bb.get("width") if bb else None,
+            bb_height=bb.get("height") if bb else None,
+            length_mm=d.length_mm,
+            depth_mm=d.depth_mm,
+            width_mm=d.width_mm,
+            position=d.location_description or d.label or "",
+        )
+        db.add(new_defect)
+        defects_parsed.append(new_defect)
+
+    target_frame.defects = defects_parsed
+    session.status = "completed"
+    await db.commit()
+    await db.refresh(target_frame)
+
+    return {
+        "success": True,
+        "object_id": object_id.upper(),
+        "session_id": session.session_id,
+        "frame_index": target_frame.frame_index,
+        "defects_stored": len(defects_parsed),
+        "defects": [_orm_defects_to_schema([df])[0].model_dump() for df in defects_parsed],
+    }
+
 
 
 # ---------------------------------------------------------------------------

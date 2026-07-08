@@ -10,6 +10,7 @@ The original database records are NOT modified — this is a read-only
 re-analysis operation.
 """
 import asyncio
+import uuid
 from typing import Optional
 import httpx
 
@@ -20,7 +21,7 @@ from sqlalchemy.orm import selectinload
 from loguru import logger
 
 from app.db.database import get_db
-from app.db.models import InspectionSession, InspectionFrame
+from app.db.models import InspectionSession, InspectionFrame, FrameDefect
 from app.schemas.inspection import (
     ReinspectFrameResult,
     ReinspectResponse,
@@ -111,7 +112,10 @@ async def reinspect_object(
                 InspectionSession.object_id == object_id,
                 InspectionSession.session_id == session_id,
             )
-            .options(selectinload(InspectionSession.frames))
+            .options(
+                selectinload(InspectionSession.frames)
+                .selectinload(InspectionFrame.defects)
+            )
         )
     else:
         q = (
@@ -122,7 +126,10 @@ async def reinspect_object(
             )
             .order_by(desc(InspectionSession.created_at))
             .limit(1)
-            .options(selectinload(InspectionSession.frames))
+            .options(
+                selectinload(InspectionSession.frames)
+                .selectinload(InspectionFrame.defects)
+            )
         )
 
     result = await db.execute(q)
@@ -205,6 +212,42 @@ async def reinspect_object(
         new_annotated_url = await s3_service.upload_bytes(annotated, s3_key, "image/jpeg")
         logger.info(f"Uploaded re-annotated image → {new_annotated_url}")
 
+        # Update DB frame models
+        frame.overall_result = pair_result.overall_result.value
+        frame.weld_quality_score = pair_result.weld_quality_score
+        frame.defect_summary = pair_result.defect_summary
+        frame.standards_compliance = [s.model_dump() for s in (pair_result.standards_compliance or [])]
+        frame.recommendations = pair_result.recommendations
+        frame.model_notes = pair_result.model_notes
+        frame.annotated_image_url = new_annotated_url
+
+        for d in frame.defects:
+            await db.delete(d)
+
+        defects_parsed = []
+        for d in pair_result.defects:
+            bb = d.bounding_box
+            new_defect = FrameDefect(
+                frame_id=frame.id,
+                session_id=session.session_id,
+                defect_id=d.defect_id,
+                defect_type=d.type,
+                severity=d.severity.value if hasattr(d.severity, "value") else str(d.severity),
+                description=d.description or "",
+                confidence=d.confidence,
+                bb_x=bb.x if bb else None,
+                bb_y=bb.y if bb else None,
+                bb_width=bb.width if bb else None,
+                bb_height=bb.height if bb else None,
+                length_mm=d.length_mm,
+                depth_mm=d.depth_mm,
+                width_mm=d.width_mm,
+                position=d.position
+            )
+            db.add(new_defect)
+            defects_parsed.append(new_defect)
+        frame.defects = defects_parsed
+
         frame_results.append(
             ReinspectFrameResult(
                 frame_index=frame.frame_index,
@@ -272,8 +315,11 @@ async def reinspect_object(
     logger.info(f"Compile chart uploaded → {compile_chart_url}")
 
     # ------------------------------------------------------------------
-    # 5. Return response (DB is NOT modified)
+    # 5. Update DB and return response
     # ------------------------------------------------------------------
+    session.compile_chart_url = compile_chart_url
+    await db.commit()
+
     logger.info(
         f"Re-inspection complete | object_id={object_id} | "
         f"frames={len(frame_results)} | chart={compile_chart_url}"
