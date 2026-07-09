@@ -20,7 +20,7 @@ DIVIDER_WIDTH  = 4             # px separator between the two halves
 DIVIDER_COLOR  = (60, 60, 60)  # dark grey
 
 # Max width sent to Gemini — prevents oversized payloads and attention dilution
-MAX_OUTPUT_WIDTH = 1280
+MAX_OUTPUT_WIDTH = 4096
 
 SCALE_H        = 28            # height of the scale-bar strip
 SCALE_BG       = (20, 20, 28)
@@ -137,7 +137,7 @@ def stitch_pair(
                     new_h = int(canvas.height * scale_factor)
                     canvas = canvas.resize((MAX_OUTPUT_WIDTH, new_h), Image.LANCZOS)
                 buf = io.BytesIO()
-                canvas.save(buf, format="JPEG", quality=88)
+                canvas.save(buf, format="JPEG", quality=98, subsampling=0)
                 return buf.getvalue()
             return frame_a
 
@@ -187,7 +187,7 @@ def stitch_pair(
             logger.debug(f"Stitched image downscaled to {MAX_OUTPUT_WIDTH}×{new_h}px")
 
         buf = io.BytesIO()
-        canvas.save(buf, format="JPEG", quality=88)
+        canvas.save(buf, format="JPEG", quality=98, subsampling=0)
         logger.debug(
             f"Stitched pair → {canvas.width}×{canvas.height}px  "
             f"[{start_cm_a:.1f}–{start_cm_a + length_cm_a + length_cm_b:.1f} cm]"

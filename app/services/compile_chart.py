@@ -37,7 +37,7 @@ FOOTER_H    = 46
 # Card image height — the most important setting.
 # Weld stitched images are ~2:1 to 4:1 wide. At ~1650px card width, we
 # want the image to be tall enough so weld details are clearly visible.
-CARD_IMG_H  = 520        # px — increased from 400 for readability
+CARD_IMG_H  = 720        # px — increased for high-resolution zoom readability
 
 PAGE_W      = 3508       # A4 @ 300 dpi landscape
 
@@ -61,16 +61,18 @@ CARD_BORDER = ( 36,  44,  72)
 
 # Defect type colors (must match annotation_service)
 DEFECT_COLORS = {
-    "blowhole":             (255,   0,   0),
-    "porosity":             (255,   0,   0),
-    "undercut":             (255, 140,   0),
-    "underfill":            ( 30, 144, 255),
-    "excess reinforcement": (148,   0, 211),
-    "high hump":            (148,   0, 211),
-    "spatter":              (  0, 204,   0),
-    "overlap":              (192, 192, 192),
-    "lack of fusion":       (255, 215,   0),
-    "crack":                (220,  20,  60),
+    "blowhole":             (0, 224, 255),
+    "porosity":             (0, 224, 255),
+    "undercut":             (255, 45, 45),
+    "underfill":            (40, 130, 255),
+    "excess reinforcement": (255, 45, 235),
+    # "high hump":            (255, 45, 235),
+    # "spatter":              (255, 214, 0),
+    # "overlap":              (0, 255, 140),
+    # "lack of fusion":       (180, 60, 255),
+    # "crack":                (255, 0, 60),
+    # "slag":                 (150, 100, 40),
+    # "crater":               (255, 140, 0),
 }
 
 
@@ -266,7 +268,7 @@ def build_compile_chart(
         draw.rectangle([cx, cy, cx + card_w, cy + LABEL_H], fill=LABEL_BG)
 
         if res:
-            lbl = f"Pair {idx + 1}  |  {res.source_frame_a_label}"
+            lbl = f"Image {idx + 1}  |  {res.source_frame_a_label}"
             if res.source_frame_b_label:
                 lbl += f" + {res.source_frame_b_label}"
 
@@ -366,7 +368,7 @@ def build_compile_chart(
     )
 
     buf = io.BytesIO()
-    canvas.save(buf, format="JPEG", quality=94, optimize=True)
+    canvas.save(buf, format="JPEG", quality=98, subsampling=0, optimize=True)
     return buf.getvalue()
 
 

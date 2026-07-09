@@ -483,7 +483,7 @@ async def inspect_object(
             # API 1 specific: Call the new inspect_with_measurements
             raw_result = await gemini_service.inspect_with_measurements(
                 image_bytes=stitched_bytes,
-                model_name="gemini-2.5-flash"
+                model_name="gemini-2.5-pro"
             )
 
             # Map the raw JSON back into DB models
@@ -620,10 +620,10 @@ async def generate_images_for_object(
         images_generated = 0
 
         for frame in frames:
-            start_cm = frame.frame_index * seg_len * 2
+            start_cm = frame.frame_index * seg_len
             len_a = seg_len
-            len_b = seg_len if frame.source_frame_b_label else 0.0
-            end_cm = start_cm + len_a + len_b
+            len_b = 0.0
+            end_cm = start_cm + len_a
             pair_cm_ranges.append((start_cm, end_cm) if seg_len > 0 else None)
 
             if not frame.stitched_image_url or ".amazonaws.com/" not in frame.stitched_image_url:
@@ -665,8 +665,8 @@ async def generate_images_for_object(
                 f"WeldVision — {session.object_name or session.object_id} "
                 f"| Scan {session.scan_number or 'N/A'} "
                 f"| Side: {session.side or 'N/A'} "
-                f"| {total_images} frames → {num_pairs} pairs"
-                + (f" | {seg_len * total_images:.0f} cm total" if seg_len > 0 else "")
+                f"| {total_images} frames"
+                + (f" | {seg_len * num_pairs:.0f} cm total" if seg_len > 0 else "")
             )
 
             if any(b is not None for b in annotated_bytes_list):

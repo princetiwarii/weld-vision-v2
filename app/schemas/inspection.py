@@ -37,6 +37,7 @@ class Defect(BaseModel):
     severity:            DefectSeverity
     description:         str
     confidence:          float = Field(..., ge=0.0, le=1.0)
+    shape:               Optional[str]   = None  # "rectangle" | "square" | "circle" | "oval"
     bounding_box:        Optional[BoundingBox] = None
     length_mm:           Optional[float] = None
     depth_mm:            Optional[float] = None

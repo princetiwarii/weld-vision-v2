@@ -343,6 +343,46 @@ def _draw_arrowhead(draw, x1, y1, x2, y2, color, size=8):
     draw.polygon(pts, fill=color)
 
 
+# ─── Scale Bar Drawing helper ──────────────────────────────────────────────────
+
+def _get_font(size: int):
+    return _load_font(FONT_PATHS_REG, size)
+
+
+def append_0_20cm_scale_bar(image: Image.Image) -> Image.Image:
+    w, h = image.size
+    ruler_h = max(45, int(h * 0.07))
+    canvas = Image.new("RGB", (w, h + ruler_h), (14, 18, 28))
+    canvas.paste(image, (0, 0))
+    draw = ImageDraw.Draw(canvas)
+    
+    # Blue colored measurement band across the top of ruler strip
+    draw.rectangle([0, h, w, h + int(ruler_h * 0.35)], fill=(28, 80, 170))
+    
+    pad_x = int(w * 0.025)
+    span_w = w - 2 * pad_x
+    if span_w <= 0:
+        return canvas
+        
+    font = _get_font(max(12, int(ruler_h * 0.28)))
+    
+    for cm in range(21):
+        tx = int(pad_x + (cm / 20.0) * span_w)
+        if cm % 2 == 0 or cm in (5, 15):
+            draw.line([(tx, h), (tx, h + int(ruler_h * 0.55))], fill=(200, 220, 250), width=max(2, int(w * 0.002)))
+            label = f"{cm} cm" if cm in (0, 5, 10, 15, 20) else f"{cm}"
+            try:
+                bbox = draw.textbbox((0, 0), label, font=font)
+                tw = bbox[2] - bbox[0]
+            except Exception:
+                tw = int(len(label) * 6)
+            draw.text((tx - tw // 2, h + int(ruler_h * 0.58)), label, fill=(220, 235, 255), font=font)
+        else:
+            draw.line([(tx, h), (tx, h + int(ruler_h * 0.38))], fill=(130, 160, 200), width=max(1, int(w * 0.001)))
+            
+    return canvas
+
+
 # ─── Main public function ─────────────────────────────────────────────────────
 
 def annotate_image(

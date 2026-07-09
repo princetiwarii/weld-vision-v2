@@ -28,7 +28,6 @@ from loguru import logger
 from app.db.database import get_db
 from app.db.models import InspectionSession, InspectionFrame
 from app.schemas.inspection import VideoUploadResponse
-from app.services.image_stitcher import stitch_pair
 from app.services.s3_service import s3_service
 
 router = APIRouter()
@@ -173,55 +172,44 @@ async def analyze_weld_images(
     elapsed   = 0.0
 
     try:
-        num_pairs = math.ceil(total_images / 2)
+        from PIL import Image
+        import io
+        from app.services.annotation_service import append_0_20cm_scale_bar
 
-        for pair_idx in range(num_pairs):
-            i_a = pair_idx * 2
-            i_b = i_a + 1
+        for i, (label, raw, _) in enumerate(image_data):
+            # Load raw image bytes, append scale bar, and convert back to JPEG
+            img = Image.open(io.BytesIO(raw)).convert("RGB")
+            img_with_scale = append_0_20cm_scale_bar(img)
+            buf = io.BytesIO()
+            img_with_scale.save(buf, format="JPEG", quality=98)
+            processed_raw = buf.getvalue()
 
-            label_a, raw_a, _ = image_data[i_a]
-
-            has_b   = i_b < total_images
-            label_b = image_data[i_b][0] if has_b else None
-            raw_b   = image_data[i_b][1] if has_b else None
-
-            start_cm = i_a * seg_len
-            len_a    = seg_len
-            len_b    = seg_len if has_b else 0.0
-            end_cm   = start_cm + len_a + len_b
-
-            stitched = stitch_pair(
-                raw_a, raw_b,
-                start_cm_a=start_cm,
-                length_cm_a=len_a,
-                length_cm_b=len_b,
-            )
-
-            stitch_key   = f"inspections/{object_id}/{session_id}/frames/stitched/{label_a}.jpg"
-            stitched_url = await s3_service.upload_bytes(stitched, stitch_key, "image/jpeg")
+            # Upload the processed frame containing scale bar to S3.
+            stitch_key   = f"inspections/{object_id}/{session_id}/frames/raw/{label}.jpg"
+            stitched_url = await s3_service.upload_bytes(processed_raw, stitch_key, "image/jpeg")
 
             logger.info(
-                f"[{session_id}] Stitched pair {label_a}"
-                + (f"+{label_b}" if label_b else " (single)")
-                + f"  [{start_cm:.1f}–{end_cm:.1f} cm]"
-                + f"  [{pair_idx + 1}/{num_pairs}]"
+                f"[{session_id}] Uploaded frame with scale bar {label} "
+                f"  [{i + 1}/{total_images}]"
             )
 
+            # We persist this frame. To keep compatibility, we place the URL in stitched_image_url
+            # so the rest of the flow can use it without schema changes if we want.
             await _persist_pending_frame(
                 db=db,
                 session_id=session_id,
-                frame_index=pair_idx,
-                image_label=label_a,
-                source_frame_a_label=label_a,
-                source_frame_b_label=label_b,
-                timestamp_a=float(i_a),
-                timestamp_b=float(i_b) if has_b else None,
+                frame_index=i,
+                image_label=label,
+                source_frame_a_label=label,
+                source_frame_b_label=None,
+                timestamp_a=float(i),
+                timestamp_b=None,
                 stitched_image_url=stitched_url,
             )
 
         elapsed = round(time.time() - t_start, 2)
         await db.commit()
-        logger.info(f"[{session_id}] OK: Done in {elapsed}s — {total_images} images, {num_pairs} pairs")
+        logger.info(f"[{session_id}] OK: Done in {elapsed}s — {total_images} images saved")
 
     except HTTPException:
         await db.rollback()
@@ -235,10 +223,10 @@ async def analyze_weld_images(
         )
 
     return VideoUploadResponse(
-        message=f"Upload complete. {total_images} images processed, {num_pairs} stitched pairs saved.",
+        message=f"Upload complete. {total_images} images processed and saved.",
         session_id=session_id,
         object_id=object_id,
         frames_extracted=total_images,
-        frame_pairs_stitched=num_pairs,
+        frame_pairs_stitched=total_images,  # repurposing this field as total frames
         status="pending"
     )

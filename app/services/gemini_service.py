@@ -76,20 +76,18 @@ Required JSON format:
 
 WELD_BEAD_LOCALIZATION_PROMPT = """\
 You are an expert computer vision system.
-Your task is to locate the primary weld bead(s) / weld joint line(s) in the image.
+Your task is to locate the primary horizontal weld bead(s) in the image.
 Provide a list of bounding boxes, where each box tightly encloses a weld bead segment.
 Ignore the background. Focus only on the actual weld metal.
 
 The image coordinate system:
-- x=0.0 is the LEFT edge, x=1.0 is the RIGHT edge
-- y=0.0 is the TOP edge, y=1.0 is the BOTTOM edge
-- bounding_box = {"x": left_edge, "y": top_edge, "width": box_width, "height": box_height}
-- All values must be between 0.0 and 1.0
+- Coordinates must be a list of 4 integers [ymin, xmin, ymax, xmax] between 0 and 1000.
+- ymin is the top edge, xmin is the left edge, ymax is the bottom edge, xmax is the right edge.
 
 Return EXACTLY in this JSON format with no other text:
 {
   "weld_beads": [
-    {"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
+    [0, 0, 0, 0]
   ]
 }
 """
@@ -100,16 +98,17 @@ I have already identified a list of weld defects.
 Your task is to locate each specific defect WITHIN THIS CROPPED IMAGE and provide its precise bounding box coordinates.
 
 The image coordinate system:
-- x=0.0 is the LEFT edge, x=1.0 is the RIGHT edge
-- y=0.0 is the TOP edge, y=1.0 is the BOTTOM edge
-- bounding_box = {"x": left_edge, "y": top_edge, "width": box_width, "height": box_height}
-- All values must be between 0.0 and 1.0
-- The boxes must be TIGHT around the actual visible defect pixels.
+- Coordinates must be a list of 4 integers [ymin, xmin, ymax, xmax] between 0 and 1000.
+- ymin is the top edge, xmin is the left edge, ymax is the bottom edge, xmax is the right edge.
+- The boxes must tightly enclose the visible defect area.
 
-IMPORTANT: 
-- If a defect is NOT visible in this specific crop, set its bounding_box values all to 0.0.
-- Defects like undercut and underfill are usually at the edges (toes) of the weld.
-- Spatter may be scattered around.
+IMPORTANT:
+- If a defect is NOT visible in this specific crop, set its bounding box values all to 0.
+CRITICAL SIZING & POSITIONING RULES FOR PRIORITY DEFECTS:
+- Our priority defects whose annotations we require on the image are ONLY: Underfill, Undercut, Excess Reinforcement, and Blowhole (Porosity).
+- POSITIONING IS CRITICAL: The bounding box MUST BE LOCATED ON THE WELD BEAD ITSELF. DO NOT place bounding boxes floating out in the parent metal, rust, or background above or below the weld bead! For undercut and underfill, place the box directly on the toe/edge OF THE WELD BEAD.
+- When locating these four defects, ensure the bounding box covers the WHOLE defect area completely so that when a transparent rectangle is drawn over it, the entire defect space is covered and visible.
+- Every box MUST have minimum width/height corresponding to at least 60 units in the 0-1000 scale so it is clearly visible as a distinct rectangle drawn on the image — NOT a thin line or dot.
 
 Defects to locate:
 {defects_json}
@@ -119,48 +118,57 @@ Return EXACTLY in this JSON format with no other text:
   "defects": [
     {
       "defect_id": "<Exact defect_id from input>",
-      "bounding_box": {"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
+      "bounding_box": [0, 0, 0, 0]
     }
   ]
 }
 """
 
 WELD_MEASUREMENT_INSPECTION_PROMPT = """\
-Act as an expert Certified Welding Inspector (CWI).
+Act as an expert Certified Welding Inspector (CWI) performing a precision visual inspection.
 
-I have provided a stitched weld image. A physical scale/ruler is visible at the bottom of the image.
+I have provided a single weld image showing a 20 cm horizontal weld bead. A physical scale/ruler is visible at the bottom.
 
-CRITICAL INSTRUCTION: You MUST methodically scan the image in three passes:
-1. First, scan the entire length of the HORIZONTAL weld bead(s).
-2. Second, scan the entire length of the VERTICAL weld bead(s).
-3. Third, closely inspect the intersection (T-joint) where they meet.
+IMAGE LAYOUT (CRITICAL — read before anything else):
+- The weld bead is the HORIZONTAL dark/silvery seam running LEFT to RIGHT across the image.
+- The weld bead typically occupies the vertical band from approximately y=300 to y=700 on the vertical scale.
+- ABOVE and BELOW the weld bead is parent/base metal — DO NOT place defect boxes there.
+- The scale bar at the bottom spans 0 to 20 cm.
 
-Your task:
-1. READ the scale bar carefully. Determine:
-   - What is the total length of weld visible in this image (in mm)?
-   - What is the cm/mm span of the scale ruler visible?
-   Record this as "total_weld_length_mm" and "scale_notes".
+YOUR TASK — scan left to right:
+1. READ the scale bar. Record total_weld_length_mm and scale_notes.
 
-2. You must prioritize and explicitly look for the following critical defects across ALL areas:
-   1. Underfill
-   2. Undercut
-   3. Blowholes (Porosity)
-   4. Excess Reinforcement
-   Also note other defect types if present (spatter, lack of fusion, cracks, overlap, crater, slag, etc.).
+2. Scan the weld bead from LEFT to RIGHT. For each defect you find:
+   - Identify what type it is (only these 4 types matter):
+     1. Undercut
+     2. Underfill
+     3. Excess Reinforcement
+     4. Blowhole (Porosity)
+   - DO NOT report spatter, rust, discoloration, slag, or parent metal marks!
 
-3. For EACH defect found:
-   - Measure its LENGTH along the weld axis using the scale bar as reference.
-   - State exactly WHERE it is: left/right/centre of the image, upper/lower toe,
-     which cm mark it starts and ends at (e.g. "from 45 cm to 50 cm").
-   - CRITICAL RULE: If a defect like undercut or underfill appears in multiple separate locations, you MUST create a SEPARATE defect entry for EACH distinct location/segment. Do not just report the first one you see.
-   - Group widespread clustered defects (e.g., many tiny spatter dots in the same area) into ONE zone entry.
+3. For each defect, provide a bounding_box that:
+   - Is placed DIRECTLY ON THE WELD BEAD where the defect is visible.
+   - The bounding_box must be a list of 4 integers [ymin, xmin, ymax, xmax] between 0 and 1000.
+   - ymin is the top edge, xmin is the left edge, ymax is the bottom edge, xmax is the right edge.
+   - The box must be large enough that when drawn as a transparent colored rectangle, the defect underneath is clearly highlighted and visible through it.
 
-RULES:
-- Maximum 15 defect entries.
-- Do NOT include bounding_box in this response.
-- All measurements MUST be physically consistent with the scale you read.
-- length_mm: the physical length of the defect along the weld axis.
-- start_cm / end_cm: where on the ruler this defect begins and ends.
+BOUNDING BOX RULES (MOST IMPORTANT):
+- ALL boxes MUST sit ON the weld bead. The weld bead center is approximately ymin=450 to ymax=550.
+- For undercut/underfill at the upper toe: ymin should be approximately 300-400, ymax ~420-580.
+- For undercut/underfill at the lower toe: ymin should be approximately 550-650, ymax ~670-830.
+- For excess reinforcement on the bead crown: ymin should be approximately 350-450, ymax ~500-650.
+- For blowholes: place a box centered on the visible pit, minimum size 40x80.
+- NEVER place a box above ymin=250 or below ymax=750 — those areas are parent metal, not weld.
+- Maximum 10 defect entries total. Only report defects you are genuinely confident about (confidence >= 0.6).
+
+4. NEVER MERGE separate defects into one box. Each continuous defect gets its own box.
+
+5. For each defect also record:
+   - "shape": "rectangle" for elongated defects (undercut, underfill, reinforcement), "circle" or "oval" for blowholes/pits.
+   - "confidence": 0.0 to 1.0. Do NOT include defects below 0.6 confidence.
+   - Length in mm along the weld axis using the scale bar.
+   - Position: scale mark range (e.g. "3cm to 5cm"), location_side, weld_zone.
+
 - location_side: "left" | "center" | "right" | "full-width"
 - weld_zone: "upper_toe" | "bead_centre" | "lower_toe" | "heat_affected_zone" | "scattered"
 
@@ -170,25 +178,28 @@ Return EXACTLY this JSON, no other text:
   "overall_result": "pass"|"fail"|"review",
   "weld_quality_score": 85,
   "scale_detected": true,
-  "scale_notes": "<e.g. Scale bar spans 40 cm to 65 cm, total 25 cm = 250 mm visible>",
-  "total_weld_length_mm": 250.0,
-  "defect_summary": {"Spatter": 1, "Undercut": 2},
+  "scale_notes": "<e.g. Scale bar spans 0 cm to 20 cm, total 20 cm = 200 mm>",
+  "total_weld_length_mm": 200.0,
+  "defect_summary": {"Undercut": 2, "Underfill": 1},
   "defects": [
     {
       "defect_id": "Seq 1",
       "type": "<Defect Type>",
-      "label": "<Short label e.g. 'Undercut at upper toe, 45–48 cm'>",
+      "label": "<Short label e.g. 'Undercut at upper toe, 3-5 cm'>",
       "description": "<Detailed remarks>",
       "severity": "low"|"medium"|"high"|"critical",
-      "estimated_count": "<e.g. 3 pits>",
-      "length_mm": 30.0,
-      "width_mm": 2.1,
+      "confidence": 0.9,
+      "shape": "rectangle"|"square"|"circle"|"oval",
+      "estimated_count": "<e.g. 1>",
+      "length_mm": 20.0,
+      "width_mm": 2.0,
       "depth_mm": 0.0,
-      "start_cm": 45.0,
-      "end_cm": 48.0,
+      "start_cm": 3.0,
+      "end_cm": 5.0,
       "location_side": "left",
       "weld_zone": "upper_toe",
-      "location_description": "<Very precise: references scale marks, left/right, upper/lower toe>"
+      "bounding_box": [350, 150, 470, 250],
+      "location_description": "<Precise description>"
     }
   ],
   "standards_compliance": [
@@ -200,6 +211,173 @@ Return EXACTLY this JSON, no other text:
 }
 """
 
+_BBOX_SCHEMA = {
+    "type": "ARRAY",
+    "items": {
+        "type": "INTEGER",
+        "minimum": 0,
+        "maximum": 1000
+    },
+    "minItems": 4,
+    "maxItems": 4
+}
+
+_DEFECT_ENTRY_SCHEMA = {
+    "type": "OBJECT",
+    "property_ordering": [
+        "defect_id", "type", "label", "confidence", "shape", "severity",
+        "estimated_count", "length_mm", "width_mm", "depth_mm",
+        "start_cm", "end_cm", "location_side", "weld_zone",
+        "bounding_box", "location_description", "description",
+    ],
+    "properties": {
+        "defect_id":             {"type": "STRING"},
+        "type":                  {"type": "STRING"},
+        "label":                 {"type": "STRING"},
+        "confidence":            {"type": "NUMBER"},
+        "shape":                 {"type": "STRING", "enum": ["rectangle", "square", "circle", "oval"]},
+        "severity":              {"type": "STRING", "enum": ["low", "medium", "high", "critical"]},
+        "estimated_count":       {"type": "STRING"},
+        "length_mm":             {"type": "NUMBER"},
+        "width_mm":              {"type": "NUMBER"},
+        "depth_mm":              {"type": "NUMBER"},
+        "start_cm":              {"type": "NUMBER"},
+        "end_cm":                {"type": "NUMBER"},
+        "location_side":         {"type": "STRING", "enum": ["left", "center", "right", "full-width"]},
+        "weld_zone":             {"type": "STRING", "enum": ["upper_toe", "bead_centre", "lower_toe", "heat_affected_zone", "scattered"]},
+        "bounding_box":          _BBOX_SCHEMA,
+        "location_description":  {"type": "STRING"},
+        "description":           {"type": "STRING"},
+    },
+    "required": ["defect_id", "type", "severity", "confidence", "shape", "bounding_box", "description"],
+}
+
+WELD_INSPECTION_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "property_ordering": [
+        "valid", "overall_result", "weld_quality_score", "scale_detected",
+        "scale_notes", "total_weld_length_mm", "defect_summary", "defects",
+        "standards_compliance", "recommendations", "model_notes",
+    ],
+    "properties": {
+        "valid":                 {"type": "BOOLEAN"},
+        "overall_result":        {"type": "STRING", "enum": ["pass", "fail", "review"]},
+        "weld_quality_score":    {"type": "NUMBER"},
+        "scale_detected":        {"type": "BOOLEAN"},
+        "scale_notes":           {"type": "STRING"},
+        "total_weld_length_mm":  {"type": "NUMBER"},
+        # Committing to counts-per-type BEFORE the itemized list (property_ordering
+        # above forces this key to be generated first) is the count-consistency
+        # cross-check described in the prompt.
+        "defect_summary":        {"type": "OBJECT"},
+        "defects":                {"type": "ARRAY", "items": _DEFECT_ENTRY_SCHEMA},
+        "standards_compliance": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "standard":  {"type": "STRING"},
+                    "grade":     {"type": "STRING"},
+                    "compliant": {"type": "BOOLEAN"},
+                    "notes":     {"type": "STRING"},
+                },
+                "required": ["standard", "compliant"],
+            },
+        },
+        "recommendations": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "model_notes":     {"type": "STRING"},
+    },
+    "required": ["valid", "overall_result", "weld_quality_score", "defect_summary", "defects"],
+}
+
+WELD_BEAD_LOCALIZATION_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "weld_beads": {
+            "type": "ARRAY",
+            "items": {
+                "type": "ARRAY",
+                "items": {"type": "INTEGER"},
+                "minItems": 4,
+                "maxItems": 4
+            }
+        }
+    },
+    "required": ["weld_beads"]
+}
+
+WELD_DEFECT_LOCALIZATION_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "defects": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "defect_id": {"type": "STRING"},
+                    "bounding_box": {
+                        "type": "ARRAY",
+                        "items": {"type": "INTEGER"},
+                        "minItems": 4,
+                        "maxItems": 4
+                    }
+                },
+                "required": ["defect_id", "bounding_box"]
+            }
+        }
+    },
+    "required": ["defects"]
+}
+
+
+WELD_DEFECT_LOCALIZATION_FULL_IMAGE_PROMPT = """\
+You are a precision computer vision system analyzing a weld inspection image.
+I have already identified defects in this image. Your ONLY task is to draw a BOUNDING BOX around each defect.
+
+This is the EXACT SAME full stitched image. Do NOT mentally crop or zoom.
+
+CRITICAL — WELD BEAD LOCATION:
+- The weld bead (the dark/silvery seam of deposited metal) is the HORIZONTAL BAND in the LOWER HALF of the image, typically between y=400 and y=800.
+- ALL defect bounding boxes MUST be placed ON or immediately adjacent to the WELD BEAD — NOT above it in the bare metal zone.
+- The area ABOVE y=400 is bare metal / parent plate. Do NOT place any defect box there unless the defect is explicitly a heat-affected zone defect.
+- If you cannot see the defect clearly, set all values to 0 (the sentinel) so the fallback can handle it.
+
+COORDINATE SYSTEM (relative to the FULL IMAGE):
+- Coordinates must be a list of 4 integers [ymin, xmin, ymax, xmax] between 0 and 1000.
+- ymin is the top edge, xmin is the left edge, ymax is the bottom edge, xmax is the right edge.
+
+SIZING & POSITIONING RULES (CRITICAL):
+- Only locate these 4 defect types: Underfill, Undercut, Excess Reinforcement, Blowhole (Porosity).
+- ALL boxes MUST sit ON THE WELD BEAD (approximately y=300 to y=700). NEVER above y=250 or below y=750.
+- Minimum width/height in 0-1000 scale should cover at least 40 to 80 units. NO hairline-thin boxes.
+- For undercut/underfill at upper toe: ymin ~300-400, ymax ~420-580.
+- For undercut/underfill at lower toe: ymin ~550-650, ymax ~670-830.
+- For excess reinforcement: ymin ~350-450, ymax ~500-650.
+- For blowholes: centered on the pit, minimum size 40x80.
+- The box must be large enough that the defect is clearly visible through a transparent colored rectangle drawn over it.
+- If you cannot see the defect clearly, set all values to 0.
+
+Defects to locate:
+{defects_json}
+
+Return EXACTLY this JSON format, no other text:
+{
+  "defects": [
+    {
+      "defect_id": "<Exact defect_id from input>",
+      "bounding_box": [0, 0, 0, 0]
+    }
+  ]
+}
+"""
+
+
+
+def _safe_float(val) -> float | None:
+    try:
+        return float(val) if val is not None else None
+    except (ValueError, TypeError):
+        return None
 
 def _salvage_truncated_json(raw: str) -> dict:
     """Attempt to parse Gemini output even if truncated."""
@@ -214,7 +392,7 @@ def _salvage_truncated_json(raw: str) -> dict:
         overall  = or_match.group(1) if or_match else "review"
         score    = float(qs_match.group(1)) if qs_match else 0.0
 
-        defect_pattern = re.compile(r'\{\s*"defect_id"[\s\S]*?"bounding_box"\s*:\s*\{[^{}]*\}[\s\S]*?\}', re.DOTALL)
+        defect_pattern = re.compile(r'\{\s*"defect_id"[\s\S]*?"bounding_box"\s*:\s*(?:\{[^{}]*\}|\[[^\]]*\])[\s\S]*?\}', re.DOTALL)
         raw_defects    = defect_pattern.findall(raw)
         parsed_defects = []
         for d in raw_defects:
@@ -524,22 +702,234 @@ def build_object_summary_table(image_outputs: list[dict]) -> dict:
     }
 
 
-def _safe_float(val) -> float | None:
-    if val is None:
-        return None
+def _estimate_bbox_from_text(defect: dict, total_weld_mm: float) -> dict | None:
+    """
+    Fallback: compute an approximate bounding box from the text location fields
+    when Gemini's Pass 2 localization fails to return a bbox for a defect.
+
+    Uses start_cm/end_cm for horizontal position, and location_side + weld_zone
+    for vertical position within the image.
+
+    NOTE: y-values are anchored to the WELD BEAD which sits in the lower half
+    of the stitched image (approximately y=0.42 to y=0.78). The upper portion
+    of the image is bare parent plate — defect boxes must NOT be placed there.
+    """
     try:
-        f = float(val)
-        return None if str(val).lower() in ("n/a", "null", "none") else f
-    except (ValueError, TypeError):
+        start_cm = defect.get("start_cm")
+        end_cm   = defect.get("end_cm")
+        loc_side = (defect.get("location_side") or "center").lower()
+        weld_zone = (defect.get("weld_zone") or "bead_centre").lower()
+
+        # --- Horizontal position from scale marks ---
+        total_cm = total_weld_mm / 10.0 if total_weld_mm > 0 else 0
+        if total_cm > 0 and start_cm is not None and end_cm is not None:
+            x  = max(0.0, float(start_cm) / total_cm)
+            x2 = min(1.0, float(end_cm) / total_cm)
+            bw = max(0.06, x2 - x)
+        elif loc_side in ("left",):
+            x, bw = 0.02, 0.30
+        elif loc_side in ("right",):
+            x, bw = 0.68, 0.30
+        elif loc_side in ("full-width", "full_width"):
+            x, bw = 0.0, 1.0
+        else:  # center
+            x, bw = 0.35, 0.30
+
+        # --- Vertical position from weld_zone ---
+        # Weld bead sits in the LOWER half of the stitched image: ~y=0.42–0.78.
+        # upper_toe  = top edge of the weld bead  (~y=0.42)
+        # bead_centre = crown of the weld bead     (~y=0.50)
+        # lower_toe  = bottom edge of the weld     (~y=0.60)
+        # heat_affected = just above the weld bead (~y=0.38)
+        # scattered   = spans the whole weld band  (~y=0.42)
+        if "upper_toe" in weld_zone:
+            y, bh = 0.40, 0.14
+        elif "lower_toe" in weld_zone:
+            y, bh = 0.58, 0.14
+        elif "bead_centre" in weld_zone or "bead_center" in weld_zone:
+            y, bh = 0.48, 0.16
+        elif "heat_affected" in weld_zone:
+            y, bh = 0.34, 0.14
+        elif "scattered" in weld_zone:
+            y, bh = 0.42, 0.28
+        else:
+            y, bh = 0.46, 0.16
+
+        # Clamp to safe range
+        x  = max(0.0, min(0.93, x))
+        y  = max(0.0, min(0.80, y))
+        bw = max(0.06, min(1.0 - x, bw))
+        bh = max(0.06, min(0.85 - y, bh))
+
+        return {"x": round(x, 4), "y": round(y, 4), "width": round(bw, 4), "height": round(bh, 4)}
+    except Exception:
         return None
 
 
 class GeminiService:
     def __init__(self):
-        self.default_model_name = "gemini-2.5-flash"
+        self.default_model_name = "gemini-2.5-pro"
         self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        self.few_shot_examples = self._load_few_shot_examples()
 
-    async def _call_gemini(self, prompt: str, image_bytes: bytes, mime_type: str, model_name: str | None = None) -> str:
+    def _load_few_shot_examples(self) -> list:
+        import os
+        dir_path = os.path.dirname(os.path.abspath(__file__))
+        target_dir = os.path.join(dir_path, "few_shot_examples")
+        examples = []
+        
+        metadata = [
+            {
+                "filename": "example_undercut.jpg",
+                "label": "Example 1 (Undercut):",
+                "response": {
+                    "valid": True,
+                    "overall_result": "fail",
+                    "weld_quality_score": 75,
+                    "scale_detected": True,
+                    "scale_notes": "Scale bar spans 0 cm to 20 cm, total 20 cm = 200 mm",
+                    "total_weld_length_mm": 200.0,
+                    "defect_summary": {"Undercut": 1},
+                    "defects": [
+                        {
+                            "defect_id": "example_defect_1",
+                            "type": "Undercut",
+                            "label": "Undercut at upper toe, 3-5 cm",
+                            "description": "Visible undercut defect at the upper toe of the weld bead.",
+                            "severity": "medium",
+                            "confidence": 0.95,
+                            "shape": "rectangle",
+                            "estimated_count": "1",
+                            "length_mm": 20.0,
+                            "width_mm": 2.0,
+                            "depth_mm": 0.5,
+                            "start_cm": 3.0,
+                            "end_cm": 5.0,
+                            "location_side": "left",
+                            "weld_zone": "upper_toe",
+                            "bounding_box": [350, 150, 470, 250],
+                            "location_description": "Upper toe of the weld bead, near the 3-5 cm mark"
+                        }
+                    ],
+                    "standards_compliance": [
+                        {"standard": "AWS D1.1", "compliant": False, "notes": "Undercut depth exceeds allowable limit"},
+                        {"standard": "ISO 5817", "compliant": False, "notes": "Undercut depth exceeds allowable limit"}
+                    ],
+                    "recommendations": ["Grind and re-weld the undercut section at 3-5 cm"],
+                    "model_notes": "Deterministic analysis of example image 1."
+                }
+            },
+            {
+                "filename": "example_porosity.jpg",
+                "label": "Example 2 (Porosity / Blowhole):",
+                "response": {
+                    "valid": True,
+                    "overall_result": "fail",
+                    "weld_quality_score": 80,
+                    "scale_detected": True,
+                    "scale_notes": "Scale bar spans 0 cm to 20 cm, total 20 cm = 200 mm",
+                    "total_weld_length_mm": 200.0,
+                    "defect_summary": {"Blowhole (Porosity)": 1},
+                    "defects": [
+                        {
+                            "defect_id": "example_defect_2",
+                            "type": "Blowhole (Porosity)",
+                            "label": "Surface porosity at bead center, 9.6-10.4 cm",
+                            "description": "Surface porosity (blowhole) in the middle of the weld bead.",
+                            "severity": "high",
+                            "confidence": 0.98,
+                            "shape": "circle",
+                            "estimated_count": "1",
+                            "length_mm": 8.0,
+                            "width_mm": 8.0,
+                            "depth_mm": 1.0,
+                            "start_cm": 9.6,
+                            "end_cm": 10.4,
+                            "location_side": "center",
+                            "weld_zone": "bead_centre",
+                            "bounding_box": [450, 480, 530, 520],
+                            "location_description": "Center of the weld bead, near the 10 cm mark"
+                        }
+                    ],
+                    "standards_compliance": [
+                        {"standard": "AWS D1.1", "compliant": False, "notes": "Surface porosity is not permitted under AWS D1.1 for visual inspection"},
+                        {"standard": "ISO 5817", "compliant": False, "notes": "Surface porosity is not permitted"}
+                    ],
+                    "recommendations": ["Excavate the porosity defect and re-weld"],
+                    "model_notes": "Deterministic analysis of example image 2."
+                }
+            },
+            {
+                "filename": "example_reinforcement.jpg",
+                "label": "Example 3 (Excess Reinforcement):",
+                "response": {
+                    "valid": True,
+                    "overall_result": "review",
+                    "weld_quality_score": 85,
+                    "scale_detected": True,
+                    "scale_notes": "Scale bar spans 0 cm to 20 cm, total 20 cm = 200 mm",
+                    "total_weld_length_mm": 200.0,
+                    "defect_summary": {"Excess Reinforcement": 1},
+                    "defects": [
+                        {
+                            "defect_id": "example_defect_3",
+                            "type": "Excess Reinforcement",
+                            "label": "Excess reinforcement at crown, 12-16 cm",
+                            "description": "Weld reinforcement profile exceeds normal thickness limits.",
+                            "severity": "low",
+                            "confidence": 0.92,
+                            "shape": "rectangle",
+                            "estimated_count": "1",
+                            "length_mm": 40.0,
+                            "width_mm": 15.0,
+                            "depth_mm": 3.0,
+                            "start_cm": 12.0,
+                            "end_cm": 16.0,
+                            "location_side": "full-width",
+                            "weld_zone": "bead_centre",
+                            "bounding_box": [380, 600, 580, 800],
+                            "location_description": "Weld crown reinforcement spanning from 12 cm to 16 cm"
+                        }
+                    ],
+                    "standards_compliance": [
+                        {"standard": "AWS D1.1", "compliant": True, "notes": "Reinforcement height is within acceptable limits"},
+                        {"standard": "ISO 5817", "compliant": True, "notes": "Reinforcement height is within acceptable limits"}
+                    ],
+                    "recommendations": ["Monitor crown reinforcement height, no immediate rework needed"],
+                    "model_notes": "Deterministic analysis of example image 3."
+                }
+            }
+        ]
+        
+        for item in metadata:
+            filepath = os.path.join(target_dir, item["filename"])
+            if os.path.exists(filepath):
+                try:
+                    with open(filepath, "rb") as f:
+                        img_bytes = f.read()
+                    examples.append({
+                        "label": item["label"],
+                        "image_bytes": img_bytes,
+                        "response": item["response"]
+                    })
+                except Exception as e:
+                    logger.error(f"Error loading few-shot example {item['filename']}: {e}")
+            else:
+                logger.warning(f"Few-shot example image not found: {filepath}")
+                
+        return examples
+
+    async def _call_gemini(
+        self,
+        prompt: str,
+        image_bytes: bytes,
+        mime_type: str,
+        model_name: str | None = None,
+        temperature: float = 0.0,
+        response_schema: dict | None = None,
+        use_few_shot: bool = False,
+        few_shot_type: str = "inspection"
+    ) -> str:
         """Raw Gemini call — returns stripped text with rate limit retries."""
         import asyncio
         import time
@@ -548,21 +938,44 @@ class GeminiService:
         model = model_name or self.default_model_name
 
         config = types.GenerateContentConfig(
-            temperature=0.4,
+            temperature=temperature,
             max_output_tokens=65536,
         )
         if model != "gemini-2.5-flash-image":
             config.response_mime_type = "application/json"
+            if response_schema is not None:
+                config.response_schema = response_schema
+
+        contents = []
+        if use_few_shot and self.few_shot_examples:
+            contents.append("Below are reference examples of weld defect analysis with their correct bounding box coordinates formatted as [ymin, xmin, ymax, xmax] on a 0-1000 scale.")
+            for idx, ex in enumerate(self.few_shot_examples):
+                contents.append(f"Example {idx + 1} Image:")
+                contents.append(types.Part.from_bytes(data=ex["image_bytes"], mime_type="image/jpeg"))
+                if few_shot_type == "inspection":
+                    contents.append(f"Example {idx + 1} Output JSON:\n" + json.dumps(ex["response"], indent=2))
+                elif few_shot_type == "localization":
+                    loc_resp = {
+                        "defects": [
+                            {
+                                "defect_id": d["defect_id"],
+                                "bounding_box": d["bounding_box"]
+                            }
+                            for d in ex["response"]["defects"]
+                        ]
+                    }
+                    contents.append(f"Example {idx + 1} Output JSON:\n" + json.dumps(loc_resp, indent=2))
+            contents.append("Now analyze the following target weld image:")
+
+        contents.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+        contents.append(prompt)
 
         for attempt in range(6):
             try:
                 start = time.time()
                 response = await self.client.aio.models.generate_content(
                     model=model,
-                    contents=[
-                        prompt,
-                        types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
-                    ],
+                    contents=contents,
                     config=config,
                 )
                 elapsed = round(time.time() - start, 2)
@@ -595,25 +1008,7 @@ class GeminiService:
                 await asyncio.sleep(wait_time)
 
     async def _call_gemini_unified(self, image_bytes: bytes, mime_type: str, model_name: str | None = None) -> dict:
-        try:
-            raw = await self._call_gemini(WELD_INSPECTION_PROMPT, image_bytes, mime_type, model_name=model_name)
-            data = _salvage_truncated_json(raw)
-
-            if not data.get("valid", True):
-                reason = data.get("reason", "Not a weld image")
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Image rejected: {reason}",
-                )
-            return data
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Gemini API call failed: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"AI processing failed: {str(e)}",
-            )
+        return await self.inspect_with_measurements(image_bytes, mime_type=mime_type, model_name=model_name)
 
     async def inspect_with_measurements(
         self,
@@ -622,15 +1017,25 @@ class GeminiService:
         model_name: str | None = None,
     ) -> dict:
         """
-        Two-pass inspection:
-        Pass 1 — Inspect weld + read scale + calculate measurements (no bounding boxes).
-        Pass 2/3 — Localize each defect with tight bounding boxes via cropping.
-        Returns the raw_result dict (including defects with bounding_box merged in).
+        Single structured-output pass:
+          - response_schema forces valid enums/types on every field (no more
+            malformed/hallucinated field shapes to salvage).
+          - property_ordering forces defect_summary (counts) to be generated
+            BEFORE the itemized defects array, so the model commits to "how many"
+            before "where each one is" — this is the count-consistency check.
+          - temperature is lowered for this call specifically since this is a
+            precision/measurement task, not a creative one.
+          - Low-confidence entries (model's own stated confidence < 0.5) are
+            dropped rather than trusted, since it's better to omit a borderline
+            defect than draw a hallucinated box.
         """
         try:
-            logger.info("[inspect] Pass 1: weld analysis + measurement started")
+            logger.info("[inspect] Structured weld analysis started")
             raw = await self._call_gemini(
-                WELD_MEASUREMENT_INSPECTION_PROMPT, image_bytes, mime_type, model_name=model_name
+                WELD_MEASUREMENT_INSPECTION_PROMPT, image_bytes, mime_type,
+                model_name=model_name, temperature=0.0,
+                response_schema=WELD_INSPECTION_RESPONSE_SCHEMA,
+                use_few_shot=True, few_shot_type="inspection"
             )
             data = _salvage_truncated_json(raw)
 
@@ -642,23 +1047,56 @@ class GeminiService:
                 )
 
             defects = data.get("defects", [])
-            logger.info(f"[inspect] Pass 1 complete: {len(defects)} defects identified")
+            logger.info(f"[inspect] Analysis complete: {len(defects)} defects identified")
 
+            # Drop anything the model itself wasn't confident about.
+            before = len(defects)
+            defects = [
+                d for d in defects
+                if isinstance(d, dict) and float(d.get("confidence", 1.0)) >= 0.5
+            ]
+            if len(defects) != before:
+                logger.info(f"[inspect] Dropped {before - len(defects)} low-confidence defect(s)")
+
+            # Call Pass 2 localization for high-precision snapped bounding boxes
             if defects:
-                loc_data = await self._localize_defects_with_crop(image_bytes, defects, mime_type, model_name)
-                bb_map = self._apply_weld_bead_constraints(defects, loc_data)
+                try:
+                    logger.info(f"[inspect] Running Pass 2 localization for {len(defects)} defects")
+                    bboxes = await self.locate_defects(image_bytes, defects, mime_type, model_name)
+                    norm_bboxes = {str(k).strip().lower(): v for k, v in bboxes.items() if k}
+                    for d in defects:
+                        did = d.get("defect_id")
+                        norm_did = str(did).strip().lower() if did else ""
+                        if norm_did in norm_bboxes:
+                            d["bounding_box"] = norm_bboxes[norm_did].model_dump()
+                        else:
+                            # Fallback: estimate from text
+                            est_bb = _estimate_bbox_from_text(d, data.get("total_weld_length_mm") or 200.0)
+                            d["bounding_box"] = est_bb
+                except Exception as e:
+                    logger.error(f"Pass 2 localization failed, falling back to text estimation: {e}")
+                    for d in defects:
+                        est_bb = _estimate_bbox_from_text(d, data.get("total_weld_length_mm") or 200.0)
+                        d["bounding_box"] = est_bb
 
-                norm_bb_map = {str(k).strip().lower(): v for k, v in bb_map.items() if k}
-                for d in defects:
-                    did = d.get("defect_id")
-                    norm_did = str(did).strip().lower() if did else ""
-                    if norm_did in norm_bb_map:
-                        d["bounding_box"] = norm_bb_map[norm_did]
-                    else:
-                        d["bounding_box"] = None
+            # Count-consistency check: compare defect_summary counts against what
+            # was actually itemized. Mismatches are logged (signal for monitoring/
+            # prompt tuning) — the itemized list is treated as source of truth
+            # for what actually gets drawn.
+            summary = data.get("defect_summary", {}) or {}
+            actual_counts: dict = {}
+            for d in defects:
+                key = str(d.get("type", "")).strip().title()
+                actual_counts[key] = actual_counts.get(key, 0) + 1
+            for stype, scount in summary.items():
+                acount = actual_counts.get(str(stype).strip().title(), 0)
+                if acount and int(scount) != acount:
+                    logger.warning(
+                        f"[inspect] Count mismatch for '{stype}': "
+                        f"summary said {scount}, itemized {acount}"
+                    )
 
-                data["defects"] = defects
-
+            data["defects"] = defects
             return data
 
         except HTTPException:
@@ -675,6 +1113,14 @@ class GeminiService:
         weld_beads = loc_data.get("weld_beads", [])
         valid_weld_beads = []
         for wb in weld_beads:
+            if isinstance(wb, list) and len(wb) >= 4:
+                ymin, xmin, ymax, xmax = wb[0], wb[1], wb[2], wb[3]
+                wb = {
+                    "x": xmin / 1000.0,
+                    "y": ymin / 1000.0,
+                    "width": (xmax - xmin) / 1000.0,
+                    "height": (ymax - ymin) / 1000.0,
+                }
             if isinstance(wb, dict):
                 wx = max(0.0, min(1.0, float(wb.get("x", 0))))
                 wy = max(0.0, min(1.0, float(wb.get("y", 0))))
@@ -687,6 +1133,14 @@ class GeminiService:
         for entry in loc_data.get("defects", []):
             did = entry.get("defect_id")
             bb  = entry.get("bounding_box")
+            if did and isinstance(bb, list) and len(bb) >= 4:
+                ymin, xmin, ymax, xmax = bb[0], bb[1], bb[2], bb[3]
+                bb = {
+                    "x": xmin / 1000.0,
+                    "y": ymin / 1000.0,
+                    "width": (xmax - xmin) / 1000.0,
+                    "height": (ymax - ymin) / 1000.0,
+                }
             if did and isinstance(bb, dict):
                 x = max(0.0, min(0.99, float(bb.get("x", 0))))
                 y = max(0.0, min(0.99, float(bb.get("y", 0))))
@@ -758,7 +1212,13 @@ class GeminiService:
             bb = d.get("bounding_box")
             try:
                 if isinstance(bb, list) and len(bb) >= 4:
-                    bb = {"x": bb[0], "y": bb[1], "width": bb[2], "height": bb[3]}
+                    ymin, xmin, ymax, xmax = bb[0], bb[1], bb[2], bb[3]
+                    bb = {
+                        "x": max(0.0, min(1.0, float(xmin) / 1000.0)),
+                        "y": max(0.0, min(1.0, float(ymin) / 1000.0)),
+                        "width": max(0.001, min(1.0 - float(xmin)/1000.0, float(xmax - xmin) / 1000.0)),
+                        "height": max(0.001, min(1.0 - float(ymin)/1000.0, float(ymax - ymin) / 1000.0)),
+                    }
                 if isinstance(bb, dict):
                     bb = {
                         "x": max(0.0, min(1.0, float(bb.get("x", 0)))),
@@ -772,12 +1232,19 @@ class GeminiService:
                 sev_raw = str(d.get("severity", "medium")).lower()
                 sev = "critical" if "crit" in sev_raw else ("high" if "high" in sev_raw else ("low" if "low" in sev_raw else "medium"))
 
-                if length_cm > 0.0 and bb:
+                length_mm = _safe_float(d.get("length_mm"))
+                if (length_mm is None or length_mm == 0.0) and length_cm > 0.0 and bb:
                     length_mm = round(bb["width"] * length_cm * 10.0, 1)
-                else:
-                    length_mm = _safe_float(d.get("length_mm"))
 
                 est_count = str(d.get("estimated_count")) if d.get("estimated_count") is not None else None
+                shape = d.get("shape")
+                if shape not in ("rectangle", "square", "circle", "oval"):
+                    shape = None
+                try:
+                    confidence = float(d.get("confidence", 1.0))
+                except (TypeError, ValueError):
+                    confidence = 1.0
+                confidence = max(0.0, min(1.0, confidence))
 
                 defects.append(Defect(
                     defect_id=str(d.get("defect_id", str(uuid.uuid4())[:8])),
@@ -785,7 +1252,8 @@ class GeminiService:
                     label=d.get("label"),
                     severity=DefectSeverity(sev),
                     description=str(d.get("description", "")),
-                    confidence=1.0,
+                    confidence=confidence,
+                    shape=shape,
                     bounding_box=BoundingBox(**bb) if bb else None,
                     length_mm=length_mm,
                     depth_mm=_safe_float(d.get("depth_mm")),
@@ -843,7 +1311,7 @@ class GeminiService:
                 response = await self.client.aio.models.generate_content(
                     model=self.default_model_name,
                     contents=[prompt, types.Part.from_bytes(data=image_bytes, mime_type=mime_type)],
-                    config=types.GenerateContentConfig(temperature=0.4),
+                    config=types.GenerateContentConfig(temperature=0.0),
                 )
                 return response.text
             except Exception as e:
@@ -853,12 +1321,23 @@ class GeminiService:
 
     async def _localize_defects_with_crop(self, image_bytes: bytes, defects: list, mime_type: str, model_name: str | None) -> dict:
         logger.info("[inspect] Localizing weld beads")
-        wb_raw = await self._call_gemini(WELD_BEAD_LOCALIZATION_PROMPT, image_bytes, mime_type, model_name=model_name)
+        wb_raw = await self._call_gemini(
+            WELD_BEAD_LOCALIZATION_PROMPT, image_bytes, mime_type, model_name=model_name,
+            temperature=0.0, response_schema=WELD_BEAD_LOCALIZATION_RESPONSE_SCHEMA
+        )
         wb_data = _salvage_truncated_json(wb_raw)
         weld_beads = wb_data.get("weld_beads", [])
 
         valid_weld_beads = []
         for wb in weld_beads:
+            if isinstance(wb, list) and len(wb) >= 4:
+                ymin, xmin, ymax, xmax = wb[0], wb[1], wb[2], wb[3]
+                wb = {
+                    "x": xmin / 1000.0,
+                    "y": ymin / 1000.0,
+                    "width": (xmax - xmin) / 1000.0,
+                    "height": (ymax - ymin) / 1000.0,
+                }
             if isinstance(wb, dict):
                 wx = max(0.0, min(1.0, float(wb.get("x", 0))))
                 wy = max(0.0, min(1.0, float(wb.get("y", 0))))
@@ -914,24 +1393,29 @@ class GeminiService:
 
             crop_img = img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
             crop_bytes_io = io.BytesIO()
-            crop_img.save(crop_bytes_io, format="JPEG")
+            crop_img.save(crop_bytes_io, format="JPEG", quality=98, subsampling=0)
             crop_bytes = crop_bytes_io.getvalue()
 
             loc_prompt = WELD_DEFECT_LOCALIZATION_PROMPT.replace(
                 "{defects_json}", json.dumps(loc_input, indent=2)
             )
 
-            def_raw = await self._call_gemini(loc_prompt, crop_bytes, mime_type, model_name=model_name)
+            def_raw = await self._call_gemini(
+                loc_prompt, crop_bytes, mime_type, model_name=model_name,
+                temperature=0.0, response_schema=WELD_DEFECT_LOCALIZATION_RESPONSE_SCHEMA,
+                use_few_shot=True, few_shot_type="localization"
+            )
             def_data = _salvage_truncated_json(def_raw)
 
             for entry in def_data.get("defects", []):
                 did = entry.get("defect_id")
                 bb = entry.get("bounding_box")
-                if did and isinstance(bb, dict):
-                    cx = float(bb.get("x", 0))
-                    cy = float(bb.get("y", 0))
-                    cw = float(bb.get("width", 0))
-                    ch = float(bb.get("height", 0))
+                if did and isinstance(bb, list) and len(bb) >= 4:
+                    ymin, xmin, ymax, xmax = bb[0], bb[1], bb[2], bb[3]
+                    cx = float(xmin) / 1000.0
+                    cy = float(ymin) / 1000.0
+                    cw = float(xmax - xmin) / 1000.0
+                    ch = float(ymax - ymin) / 1000.0
 
                     if cw > 0.01 and ch > 0.01:
                         full_x = ex + cx * ew
